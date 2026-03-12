@@ -334,27 +334,37 @@ def load_torvik_season(conn):
         return {}
 
 def load_torvik_daily(conn):
-    if not tbl_exists(conn, 'torvik_daily'): return pd.DataFrame()
+    """Load torvik_daily into a nested dict for O(log n) per-game lookups.
+    Structure: {(season, team): sorted list of (snap_int, row_dict)}
+    snap_int is YYYYMMDD as integer for fast comparison.
+    """
+    if not tbl_exists(conn, 'torvik_daily'): return {}
     try:
-        # Parse snapshot_date — handles both YYYYMMDD (backfill) and YYYY-MM-DD (old monthly)
         df = pd.read_sql(
             "SELECT season, team, adj_o, adj_d, barthag, adj_em, "
             "efg_o, efg_d, tov_o, tov_d, orb, drb, ftr_o, ftr_d, "
             "snapshot_date FROM torvik_daily", conn)
         df['team'] = df['team'].apply(norm)
-        def parse_snap(s):
-            s = str(s).strip()
-            if len(s) == 8 and '-' not in s:
-                return pd.Timestamp(f"{s[:4]}-{s[4:6]}-{s[6:8]}")
-            return pd.Timestamp(s)
-        df['snapshot_date'] = df['snapshot_date'].apply(parse_snap)
         df['season'] = df['season'].astype(int)
-        df = df.sort_values('snapshot_date').reset_index(drop=True)
-        print(f"  Torvik daily: {len(df)} snapshots")
-        return df
+        # Convert snapshot_date to YYYYMMDD int regardless of storage format
+        def snap_to_int(s):
+            return int(str(s).strip().replace('-', '')[:8])
+        df['snap_int'] = df['snapshot_date'].apply(snap_to_int)
+
+        cols = ['adj_o','adj_d','barthag','adj_em','efg_o','efg_d',
+                'tov_o','tov_d','orb','drb','ftr_o','ftr_d']
+        index = {}
+        for (season, team), grp in df.groupby(['season','team']):
+            grp_s = grp.sort_values('snap_int')
+            index[(int(season), team)] = list(zip(
+                grp_s['snap_int'].tolist(),
+                grp_s[cols].to_dict('records')
+            ))
+        print(f"  Torvik daily: {len(df):,} snapshots, {len(index):,} (season,team) keys")
+        return index
     except Exception as e:
         print(f"  Torvik daily WARNING: {e}")
-        return pd.DataFrame()
+        return {}
 
 def load_torvik_preds(conn):
     if not tbl_exists(conn, 'torvik_game_preds'): return pd.DataFrame()
@@ -553,14 +563,26 @@ def build_rest(games_df):
 
 # ── torvik daily lookup ───────────────────────
 
-def torvik_as_of(td_df, team, gdate, season):
-    if td_df.empty: return None
-    # Normalize gdate to remove any tz info for clean comparison
-    gdate_norm = pd.Timestamp(gdate).normalize()
-    mask = (td_df['team']==team) & (td_df['season']==int(season)) & (td_df['snapshot_date']<gdate_norm)
-    cands = td_df[mask]
-    if cands.empty: return None
-    return cands.loc[cands['snapshot_date'].idxmax()]
+def torvik_as_of(td_index, team, gdate, season):
+    """Fast O(log n) lookup: find most recent snapshot before game date."""
+    if not td_index: return None
+    snaps = td_index.get((int(season), team))
+    if not snaps: return None
+    # Convert game date to YYYYMMDD int
+    if hasattr(gdate, 'strftime'):
+        gdate_int = int(gdate.strftime('%Y%m%d'))
+    else:
+        gdate_int = int(str(gdate).replace('-', '')[:8])
+    # Binary search for latest snapshot strictly before game date
+    lo, hi, result = 0, len(snaps) - 1, None
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if snaps[mid][0] < gdate_int:
+            result = snaps[mid][1]
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return result
 
 
 # ── main ─────────────────────────────────────
@@ -648,7 +670,7 @@ def build_features():
 
         # ── Torvik daily snapshot (as-of game date) ──
         tvd_keys = ['adj_o','adj_d','barthag','adj_em',
-                    'efg_o','efg_d','tov_o','tov_d','orb','drb','ftr_o','ftr_d','wab']
+                    'efg_o','efg_d','tov_o','tov_d','orb','drb','ftr_o','ftr_d']
         for side, team in [('h',home),('a',away)]:
             snap = torvik_as_of(tv_d, team, gd, s)
             for k in tvd_keys:
