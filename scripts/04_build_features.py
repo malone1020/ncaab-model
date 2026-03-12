@@ -366,18 +366,52 @@ def load_torvik_preds(conn):
         return pd.DataFrame()
 
 def load_haslametrics(conn):
-    if not tbl_exists(conn, 'haslametrics'): return {}
+    """Load haslametrics_full, merging TI and TD variants per (season, team).
+    Returns dict keyed by (season, team) with all columns 05 expects."""
+    table = 'haslametrics_full' if tbl_exists(conn, 'haslametrics_full') else 'haslametrics'
+    if not tbl_exists(conn, table): return {}
     try:
-        rows = conn.execute(
-            "SELECT * FROM haslametrics"
-        ).fetchall()
+        df = pd.read_sql(f"SELECT * FROM {table}", conn)
+        df['team'] = df['team'].apply(norm)
         out = {}
-        for r in rows:
-            d = dict(r)
-            key = (int(d['season']), norm(d['team']))
-            out[key] = {f'ha_{k}': v for k, v in d.items()
-                        if k not in ('season','team','abbr','conf','wins','losses')}
-        print(f"  Haslametrics: {len(out)} entries")
+        # Build per (season, team) — prefer TI for season-level signal,
+        # use TD for momentum/delta features (TD minus TI = in-season change)
+        for (season, team), grp in df.groupby(['season', 'team']):
+            ti = grp[grp['variant'] == 'ti'].iloc[0].to_dict() if 'ti' in grp['variant'].values else {}
+            td = grp[grp['variant'] == 'td'].iloc[0].to_dict() if 'td' in grp['variant'].values else {}
+            base = ti if ti else td
+
+            def fv(d, k):
+                v = d.get(k)
+                return float(v) if v is not None and str(v) not in ('None', 'nan', '') else None
+
+            entry = {
+                # Core efficiency (from TI)
+                'o_eff':  fv(base, 'o_eff'),
+                'd_eff':  fv(base, 'd_eff'),
+                'pace':   fv(base, 'pace'),
+                'con':    fv(base, 'con'),
+                'sos':    fv(base, 'sos'),
+                'rq':     fv(base, 'rq'),
+                # Shot quality (from TI)
+                'o_3par': fv(base, 'o_3par'),
+                'd_3par': fv(base, 'd_3par'),
+                'o_prox': fv(base, 'o_prox'),
+                'd_prox': fv(base, 'd_prox'),
+                'o_mrar': fv(base, 'o_mrar'),
+                'd_mrar': fv(base, 'd_mrar'),
+                'o_fg_pct': fv(base, 'o_fg_pct'),
+                'd_fg_pct': fv(base, 'd_fg_pct'),
+                # Delta (TD minus TI = in-season momentum)
+                'delta_o_eff': (fv(td,'o_eff') - fv(ti,'o_eff'))
+                    if (ti and td and fv(td,'o_eff') is not None and fv(ti,'o_eff') is not None) else None,
+                'delta_d_eff': (fv(td,'d_eff') - fv(ti,'d_eff'))
+                    if (ti and td and fv(td,'d_eff') is not None and fv(ti,'d_eff') is not None) else None,
+                'delta_pace': (fv(td,'pace') - fv(ti,'pace'))
+                    if (ti and td and fv(td,'pace') is not None and fv(ti,'pace') is not None) else None,
+            }
+            out[(int(season), team)] = entry
+        print(f"  Haslametrics ({table}): {len(out)} (season, team) entries")
         return out
     except Exception as e:
         print(f"  Haslametrics WARNING: {e}")
@@ -570,43 +604,43 @@ def build_features():
         # ── KenPom (prior season) ──
         for side, team in [('h',home),('a',away)]:
             kp = kenpom.get((s-1, team), {})
-            for k in ['kp_em','kp_o','kp_d','kp_t']:
-                r[f'{side}_{k}'] = kp.get(k)
-        r['kp_em_gap'] = gap(r['h_kp_em'], r['a_kp_em'])
-        r['kp_o_gap']  = gap(r['h_kp_o'],  r['a_kp_o'])
-        r['kp_d_gap']  = gap(r['h_kp_d'],  r['a_kp_d'])
+            r[f'{side}_kp_adj_em'] = kp.get('kp_em')
+            r[f'{side}_kp_adj_o']  = kp.get('kp_o')
+            r[f'{side}_kp_adj_d']  = kp.get('kp_d')
+            r[f'{side}_kp_adj_t']  = kp.get('kp_t')
+        r['kp_em_gap']   = gap(r['h_kp_adj_em'], r['a_kp_adj_em'])
+        r['has_kp_home'] = int(r['h_kp_adj_em'] is not None)
+        r['has_kp_away'] = int(r['a_kp_adj_em'] is not None)
 
         # ── Torvik season (prior season) ──
-        tv_keys = ['tv_adj_em','tv_adj_o','tv_adj_d','tv_adj_t','tv_barthag',
-                   'tv_efg_o','tv_efg_d','tv_tov_o','tv_tov_d','tv_orb','tv_drb',
-                   'tv_ftr_o','tv_ftr_d','tv_two_p_o','tv_two_p_d',
-                   'tv_three_p_o','tv_three_p_d','tv_blk_pct','tv_ast_pct',
-                   'tv_avg_hgt','tv_experience','tv_pake','tv_pase',
-                   'tv_talent','tv_elite_sos','tv_wab']
+        tvs_keys = ['adj_em','adj_o','adj_d','adj_t','barthag',
+                    'efg_o','efg_d','tov_o','tov_d','orb','drb',
+                    'ftr_o','ftr_d','two_p_o','two_p_d',
+                    'three_p_o','three_p_d','blk_pct','ast_pct',
+                    'avg_hgt','experience','pake','pase',
+                    'talent','elite_sos','wab']
         for side, team in [('h',home),('a',away)]:
             tv = tv_s.get((s-1, team), {})
-            for k in tv_keys:
-                r[f'{side}_{k}'] = tv.get(k)
-        r['tv_em_gap']      = gap(r['h_tv_adj_em'],    r['a_tv_adj_em'])
-        r['tv_barthag_gap'] = gap(r['h_tv_barthag'],   r['a_tv_barthag'])
-        r['tv_efg_gap']     = gap(r['h_tv_efg_o'],     r['a_tv_efg_o'])
-        r['tv_tov_gap']     = gap(r['h_tv_tov_o'],     r['a_tv_tov_o'])
-        r['tv_orb_gap']     = gap(r['h_tv_orb'],       r['a_tv_orb'])
-        r['tv_height_gap']  = gap(r['h_tv_avg_hgt'],   r['a_tv_avg_hgt'])
-        r['tv_exp_gap']     = gap(r['h_tv_experience'],r['a_tv_experience'])
-        r['tv_talent_gap']  = gap(r['h_tv_talent'],    r['a_tv_talent'])
-        r['tv_wab_gap']     = gap(r['h_tv_wab'],       r['a_tv_wab'])
+            for k in tvs_keys:
+                r[f'{side}_tvs_{k}'] = tv.get(f'tv_{k}')
+        r['tvs_em_gap']      = gap(r['h_tvs_adj_em'],  r['a_tvs_adj_em'])
+        r['tvs_barthag_gap'] = gap(r['h_tvs_barthag'], r['a_tvs_barthag'])
+        r['has_tvs_home']    = int(r['h_tvs_adj_em'] is not None)
+        r['has_tvs_away']    = int(r['a_tvs_adj_em'] is not None)
 
         # ── Torvik daily snapshot (as-of game date) ──
         tvd_keys = ['adj_o','adj_d','adj_t','barthag','adj_em',
-                    'efg_o','efg_d','tov_o','tov_d','orb','drb','ftr_o','ftr_d']
+                    'efg_o','efg_d','tov_o','tov_d','orb','drb','ftr_o','ftr_d','wab']
         for side, team in [('h',home),('a',away)]:
             snap = torvik_as_of(tv_d, team, gd, s)
             for k in tvd_keys:
-                r[f'{side}_tvd_{k}'] = float(snap[k]) if snap is not None and snap.get(k) is not None else None
-        r['tvd_em_gap']  = gap(r.get('h_tvd_adj_em'),  r.get('a_tvd_adj_em'))
-        r['tvd_efg_gap'] = gap(r.get('h_tvd_efg_o'),   r.get('a_tvd_efg_o'))
-        r['tvd_bar_gap'] = gap(r.get('h_tvd_barthag'), r.get('a_tvd_barthag'))
+                val = snap.get(k) if snap is not None else None
+                r[f'{side}_tvd_{k}'] = float(val) if val is not None else None
+        r['tvd_em_gap']   = gap(r.get('h_tvd_adj_em'),  r.get('a_tvd_adj_em'))
+        r['tvd_efg_gap']  = gap(r.get('h_tvd_efg_o'),   r.get('a_tvd_efg_o'))
+        r['tvd_bar_gap']  = gap(r.get('h_tvd_barthag'), r.get('a_tvd_barthag'))
+        r['has_tvd_home'] = int(r.get('h_tvd_adj_em') is not None)
+        r['has_tvd_away'] = int(r.get('a_tvd_adj_em') is not None)
 
         # ── Torvik game predictions ──
         if not tv_p.empty:
@@ -621,24 +655,53 @@ def build_features():
             else:
                 r['torvik_pred'] = r['torvik_prob'] = r['torvik_vs_spread'] = None
 
-        # ── Haslametrics (prior season) ──
-        # Keys match actual DB column names (prefixed ha_ by loader)
-        ha_keys = ['ha_o_eff','ha_o_pace','ha_o_ftar','ha_o_ft_pct',
-                   'ha_d_eff','ha_d_pace','ha_d_ftar','ha_d_ft_pct',
-                   'ha_sos','ha_mom','ha_mom_o','ha_mom_d',
-                   'ha_rq','ha_afh','ha_asr','ha_rk_1','ha_rk_7','ha_rk_30']
+        # ── Haslametrics (prior season, from haslametrics_full) ──
         for side, team in [('h',home),('a',away)]:
             ha = hasla.get((s-1, team), {})
-            for k in ha_keys:
-                r[f'{side}_{k}'] = ha.get(k)
-        r['ha_o_eff_gap']  = gap(r['h_ha_o_eff'],  r['a_ha_o_eff'])
-        r['ha_d_eff_gap']  = gap(r['h_ha_d_eff'],  r['a_ha_d_eff'])
-        r['ha_sos_gap']    = gap(r['h_ha_sos'],     r['a_ha_sos'])
-        r['ha_mom_gap']    = gap(r['h_ha_mom'],     r['a_ha_mom'])
-        r['ha_rk1_gap']    = gap(r['h_ha_rk_1'],   r['a_ha_rk_1'])
-        r['ha_rk7_gap']    = gap(r['h_ha_rk_7'],   r['a_ha_rk_7'])
-        # Use ha_o_eff_gap as the summary metric for coverage reporting
-        r['ha_eff_gap']    = r['ha_o_eff_gap']
+            # HA_CORE
+            r[f'{side}_ha_o_eff']  = ha.get('o_eff')
+            r[f'{side}_ha_d_eff']  = ha.get('d_eff')
+            r[f'{side}_ha_pace']   = ha.get('pace')
+            r[f'{side}_ha_con']    = ha.get('con')
+            r[f'{side}_ha_sos']    = ha.get('sos')
+            r[f'{side}_ha_rq']     = ha.get('rq')
+            r[f'{side}_has_hasla'] = int(ha.get('o_eff') is not None)
+            # HA_SHOT
+            r[f'{side}_ha_o_3par']   = ha.get('o_3par')
+            r[f'{side}_ha_d_3par']   = ha.get('d_3par')
+            r[f'{side}_ha_o_prox']   = ha.get('o_prox')
+            r[f'{side}_ha_d_prox']   = ha.get('d_prox')
+            r[f'{side}_ha_o_mrar']   = ha.get('o_mrar')
+            r[f'{side}_ha_d_mrar']   = ha.get('d_mrar')
+            r[f'{side}_ha_o_fg_pct'] = ha.get('o_fg_pct')
+            r[f'{side}_ha_d_fg_pct'] = ha.get('d_fg_pct')
+            # HA_DELTA (TD - TI momentum)
+            r[f'{side}_ha_delta_o_eff'] = ha.get('delta_o_eff')
+            r[f'{side}_ha_delta_d_eff'] = ha.get('delta_d_eff')
+            r[f'{side}_ha_delta_pace']  = ha.get('delta_pace')
+
+        # HA_CORE gaps
+        r['ha_gap_o_eff']  = gap(r['h_ha_o_eff'],  r['a_ha_o_eff'])
+        r['ha_gap_d_eff']  = gap(r['h_ha_d_eff'],  r['a_ha_d_eff'])
+        r['ha_pace_avg']   = (r['h_ha_pace'] + r['a_ha_pace']) / 2 if (
+            r['h_ha_pace'] is not None and r['a_ha_pace'] is not None) else None
+        # HA_SHOT gaps
+        r['ha_gap_o_3par'] = gap(r['h_ha_o_3par'], r['a_ha_o_3par'])
+        r['ha_gap_d_3par'] = gap(r['h_ha_d_3par'], r['a_ha_d_3par'])
+        r['ha_gap_o_prox'] = gap(r['h_ha_o_prox'], r['a_ha_o_prox'])
+        r['ha_gap_d_prox'] = gap(r['h_ha_d_prox'], r['a_ha_d_prox'])
+        r['ha_gap_o_mrar'] = gap(r['h_ha_o_mrar'], r['a_ha_o_mrar'])
+        r['ha_gap_d_mrar'] = gap(r['h_ha_d_mrar'], r['a_ha_d_mrar'])
+        # HA_DELTA gaps
+        r['ha_momentum_gap'] = gap(r['h_ha_delta_o_eff'], r['a_ha_delta_o_eff'])
+        r['ha_def_mom_gap']  = gap(r['h_ha_delta_d_eff'], r['a_ha_delta_d_eff'])
+        # HA_MATCHUP (home offense vs away defense and vice versa)
+        r['ha_3par_matchup_h'] = gap(r['h_ha_o_3par'], r['a_ha_d_3par'])
+        r['ha_3par_matchup_a'] = gap(r['a_ha_o_3par'], r['h_ha_d_3par'])
+        r['ha_prox_matchup_h'] = gap(r['h_ha_o_prox'], r['a_ha_d_prox'])
+        r['ha_prox_matchup_a'] = gap(r['a_ha_o_prox'], r['h_ha_d_prox'])
+        # Summary for coverage reporting
+        r['ha_eff_gap'] = r['ha_gap_o_eff']
 
         # ── Rolling box score ──
         for side, team in [('h',home),('a',away)]:
