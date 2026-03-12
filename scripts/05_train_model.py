@@ -38,22 +38,68 @@ DB_PATH    = BASE_DIR / "data" / "basketball.db"
 MODEL_DIR  = BASE_DIR / "models"
 MODEL_DIR.mkdir(exist_ok=True)
 
+# Spread filter: only bet games where model has demonstrated edge
+# 9-12pt range loses -7.1% ROI, 20+pt also weak — exclude both
+SPREAD_MIN = 0.5
+SPREAD_MAX = 9.0
+
 # ── Feature columns used for training ─────────────────────────────────────────
 FEATURE_COLS = [
-    # KenPom gaps
-    "em_gap", "o_gap", "d_gap", "tempo_gap",
-    # Rolling four-factor gaps
-    "efg_gap", "tov_gap", "orb_gap", "ftr_gap",
-    "pts_gap", "margin_gap",
-    # Defensive gaps
-    "def_efg_gap", "def_tov_gap", "def_orb_gap",
-    # Home team raw rolling stats
-    "home_roll_efg", "home_roll_tov", "home_roll_orb", "home_roll_ftr",
-    "home_roll_pts", "home_roll_margin", "home_roll_pace",
-    # Away team raw rolling stats
-    "away_roll_efg", "away_roll_tov", "away_roll_orb", "away_roll_ftr",
-    "away_roll_pts", "away_roll_margin", "away_roll_pace",
-    # Context
+    # ── Torvik ratings (PRIMARY signal — daily, no leakage) ──────────────────
+    "torvik_em_gap",      # Torvik adj_em gap (home - away)
+    "torvik_barthag_gap", # Win probability gap (most predictive single metric)
+    "torvik_o_gap",       # Offensive efficiency gap
+    "torvik_d_gap",       # Defensive efficiency gap
+    "torvik_tempo_gap",   # Tempo gap (pace matchup)
+    "torvik_efg_o_gap",   # Effective FG% gap
+    "torvik_efg_d_gap",   # Defensive eFG% gap
+    "torvik_tov_gap",     # Turnover rate gap
+    "torvik_orb_gap",     # Offensive rebounding gap
+    "home_torvik_adj_em", "away_torvik_adj_em",   # Raw ratings (not just gap)
+    "home_barthag",       "away_barthag",
+
+    # ── KenPom (supplemental — cross-check against Torvik) ───────────────────
+    "em_gap",             # KenPom efficiency gap (prior season)
+    "kp_em_gap",          # Same as em_gap (explicit name)
+    "o_gap", "d_gap",     # KenPom O/D gaps
+    "home_kp_em", "away_kp_em",
+
+    # ── Rolling four-factor stats (opponent-quality adjusted) ─────────────────
+    "adj_margin_gap",     # Adjusted margin gap (our strongest raw signal)
+    "home_adj_margin", "away_adj_margin",
+    "margin_gap",         # Unadjusted rolling margin gap
+    "efg_gap", "tov_gap", "orb_gap", "ftr_gap", "pts_gap",
+    "home_roll_efg",  "away_roll_efg",
+    "home_roll_tov",  "away_roll_tov",
+    "home_roll_orb",  "away_roll_orb",
+    "home_roll_ftr",  "away_roll_ftr",
+    "home_roll_pts",  "away_roll_pts",
+    "home_roll_margin","away_roll_margin",
+    "home_roll_pace", "away_roll_pace",
+    "home_sos", "away_sos", "sos_gap",
+
+    # ── Torvik game prediction (use disagreement as signal) ───────────────────
+    "torvik_pred_margin", # Torvik's own projected margin
+    "torvik_vs_spread",   # Torvik margin vs DK spread (Torvik's own edge estimate)
+
+    # ── Home court advantage ──────────────────────────────────────────────────
+    "home_court_margin", "home_court_cover", "home_court_edge",
+
+    # ── Rest / back-to-back ───────────────────────────────────────────────────
+    "rest_diff", "home_b2b", "away_b2b", "b2b_diff",
+
+    # ── Haslametrics shot quality (unique signal vs KenPom/Torvik) ──────────
+    "hasla_ap_gap",    # adjusted performance % gap (their primary metric)
+    "hasla_prox_gap",  # avg shot distance gap (interior vs perimeter team)
+    "hasla_mrar_gap",  # mid-range attempt rate gap
+    "hasla_scc_gap",   # scoring chance conversion gap
+    "hasla_ppsc_gap",  # points per scoring chance gap
+    "hasla_3pt_gap",   # 3pt attempt % gap
+    "hasla_ftar_gap",  # free throw attempt rate gap
+    "home_hasla_ap_pct", "away_hasla_ap_pct",
+    "home_hasla_prox",   "away_hasla_prox",
+
+    # ── Game context ─────────────────────────────────────────────────────────
     "neutral_site", "conf_game",
 ]
 
@@ -180,6 +226,15 @@ def full_ats_report(df):
         ev = evaluate_ats(df, thresh)
         r  = ats_summary(ev, f"Edge > {thresh}")
         results.append(r)
+
+    # Also show filtered results (0.5-9pt spreads only) for comparison
+    print("\n── ATS Filtered: Spreads 0.5-9pt only ──────────────────────")
+    print(f"  {'Threshold':<20} {'Bets':>5}  {'W':>5}  {'L':>5}  {'Pct':>6}  {'ROI':>7}")
+    print(f"  {'-'*20} {'-'*5}  {'-'*5}  {'-'*5}  {'-'*6}  {'-'*7}")
+    df_filt = df[df["spread"].abs().between(0.5, 9.0)]
+    for thresh in [3.0, 4.0, 5.0, 6.0]:
+        ev = evaluate_ats(df_filt, thresh)
+        ats_summary(ev, f"Edge > {thresh} (filt)")
 
     print("\n── ATS Performance by Season (Edge > 3) ─────────────────────")
     print(f"  {'Season':<20} {'Bets':>5}  {'W':>5}  {'L':>5}  {'Pct':>6}  {'ROI':>7}")

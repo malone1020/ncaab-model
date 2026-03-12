@@ -1,0 +1,701 @@
+"""
+04_build_features.py
+====================
+Build unified feature matrix from ALL sources (KenPom + Torvik + Haslametrics + rolling).
+Every source gets represented. Backtest decides what's predictive.
+
+Run: python scripts/04_build_features.py
+"""
+
+import sqlite3, os, warnings
+import pandas as pd
+import numpy as np
+
+warnings.filterwarnings('ignore')
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DB   = os.path.join(ROOT, 'data', 'basketball.db')
+
+# ── team name normalization ──────────────────
+CBBD_TO_TORVIK = {
+    'A&M-Corpus Christi': 'Texas A&M-Corpus Christi',
+    'ALR': 'Little Rock',
+    'AR-Pine Bluff': 'Arkansas Pine Bluff',
+    'ASU': 'Arizona St.',
+    'Abil Chr': 'Abilene Christian',
+    'Abil Christian': 'Abilene Christian',
+    'Abil Cristian': 'Abilene Christian',
+    'Abil. Christian': 'Abilene Christian',
+    'Abilene Chr.': 'Abilene Christian',
+    'Abilene Christian Univ': 'Abilene Christian',
+    'Abilene Christian University': 'Abilene Christian',
+    'Alabama Birmingham': 'Alabama-Birmingham',
+    'Alabama St': 'Alabama St.',
+    'Alabama State': 'Alabama St.',
+    'American Univ': 'American',
+    'App St': 'Appalachian St.',
+    'App St.': 'Appalachian St.',
+    'App. St.': 'Appalachian St.',
+    'Appalachian St': 'Appalachian St.',
+    'Appalachian State': 'Appalachian St.',
+    'Arizona St': 'Arizona St.',
+    'Arizona State': 'Arizona St.',
+    'Ark Pine Bluff': 'Arkansas Pine Bluff',
+    'Ark.-Pine Bluff': 'Arkansas Pine Bluff',
+    'Arkansas Little Rock': 'Little Rock',
+    'Arkansas-LR': 'Little Rock',
+    'Arkansas-Pine Bluff': 'Arkansas Pine Bluff',
+    'BSU': 'Boise St.',
+    'Boise St': 'Boise St.',
+    'Boise State': 'Boise St.',
+    'C Michigan': 'Central Michigan',
+    'C. Michigan': 'Central Michigan',
+    'CMU': 'Central Michigan',
+    'CSU Bakersfield': 'Cal St. Bakersfield',
+    'CSU-Bakersfield': 'Cal St. Bakersfield',
+    'Cal State Bakersfield': 'Cal St. Bakersfield',
+    'CalBaptist': 'Cal Baptist',
+    'California Baptist': 'Cal Baptist',
+    'Cent Conn St': 'Central Connecticut',
+    'Cent Michigan': 'Central Michigan',
+    'Cent. Conn. St.': 'Central Connecticut',
+    'Central Mich': 'Central Michigan',
+    'Central Mich.': 'Central Michigan',
+    'Chicago St': 'Chicago St.',
+    'Chicago State': 'Chicago St.',
+    'Cleveland St': 'Cleveland St.',
+    'Cleveland State': 'Cleveland St.',
+    'Coast Carolina': 'Coastal Carolina',
+    'Coppin St': 'Coppin St.',
+    'Coppin State': 'Coppin St.',
+    'Delaware St': 'Delaware St.',
+    'Delaware State': 'Delaware St.',
+    'E Illinois': 'Eastern Ilinois',
+    'E Michigan': 'Eastern Michigan',
+    'E. Illinois': 'Eastern Ilinois',
+    'E. Michigan': 'Eastern Michigan',
+    'ETSU': 'East Tennessee St.',
+    'East Tennesse State': 'East Tennessee St.',
+    'East Texas A&M': 'Texas A&M-Commerce',
+    'F Dickinson': 'Farleigh Dickinson',
+    'FAU': 'Florida Atlantic',
+    'FGCU': 'Florida Gulf Coast',
+    'FL Atlantic': 'Florida Atlantic',
+    'Florida Intl': 'Florida International',
+    'Fresno St': 'Fresno St.',
+    'Fresno State': 'Fresno St.',
+    'Houston Chr': 'Houston Christian',
+    'IU Indy': 'IU Indianapolis',
+    'IUPUI': 'IU Indianapolis',
+    'Idaho St': 'Idaho St.',
+    'Idaho State': 'Idaho St.',
+    'Illinois St': 'Illinois St.',
+    'Illinois State': 'Illinois St.',
+    'Indiana St': 'Indiana St.',
+    'Indiana State': 'Indiana St.',
+    'Jacksonville': 'Jacksonville St.',
+    'Jacksonville St': 'Jacksonville St.',
+    'Jacksonville State': 'Jacksonville St.',
+    'Kennessaw St': 'Kennesaw St.',
+    'Kennessaw St.': 'Kennesaw St.',
+    'Kennessaw State': 'Kennesaw St.',
+    'Kent': 'Kent St.',
+    'Kent St': 'Kent St.',
+    'Kent State': 'Kent St.',
+    'LA Tech': 'Louisiana Tech',
+    'LIU Brooklyn': 'LIU',
+    'La Tech': 'Louisiana Tech',
+    'La. Tech': 'Louisiana Tech',
+    'Lamar University': 'Lamar',
+    'Long Island': 'LIU',
+    'Louisiana': 'Louisiana-Lafayette',
+    'MD E Shore': 'Maryland-Eastern Shore',
+    'MES': 'Maryland-Eastern Shore',
+    'MS Valley St': 'Mississippi Valley State',
+    'MS Valley St.': 'Mississippi Valley State',
+    'MS Valley State': 'Mississippi Valley State',
+    'Maryland Eastern Shore': 'Maryland-Eastern Shore',
+    'McNeese': 'McNeese St.',
+    'McNeese St': 'McNeese St.',
+    'McNeese State': 'McNeese St.',
+    'Miami': 'Miami (FL)',
+    'Miami FL': 'Miami (FL)',
+    'Miami FL.': 'Miami (FL)',
+    'Miami Florida': 'Miami (FL)',
+    'Miami Oh.': 'Miami (OH)',
+    'Miami Ohio': 'Miami (OH)',
+    'Miami-FL': 'Miami (FL)',
+    'Miami-OH': 'Miami (OH)',
+    'Michigan St': 'Michigan St.',
+    'Michigan State': 'Michigan St.',
+    'Miss. Valley St.': 'Mississippi Valley State',
+    'Mississippi Rebels': 'Mississippi',
+    'Mississippi Va.': 'Mississippi Valley State',
+    'Mississippi Valley St.': 'Mississippi Valley State',
+    'Morgan St': 'Morgan St.',
+    'Morgan State': 'Morgan St.',
+    'N Dakota St': 'North Dakota St.',
+    'N. Dakota St.': 'North Dakota St.',
+    'N. Dakota State': 'North Dakota St.',
+    'N. Illinois': 'Northern Illinois',
+    'NC Central': 'North Carolina Central',
+    'NCC': 'North Carolina Central',
+    'NIU': 'Northern Illinois',
+    'Nicholls': 'Nicholls St.',
+    'Nicholls St': 'Nicholls St.',
+    'Nicholls State': 'Nicholls St.',
+    'Norfolk St': 'Norfolk St.',
+    'Norfolk State': 'Norfolk St.',
+    'North Dakota State': 'North Dakota St.',
+    'Northwestern St': 'Northwestern St.',
+    'Northwestern State': 'Northwestern St.',
+    'Ole Miss': 'Mississippi',
+    'PV A&M': 'Prairie View',
+    'Portland St': 'Portland St.',
+    'Portland State': 'Portland St.',
+    'Prairie View A&M': 'Prairie View',
+    'Queens NC': 'Queens',
+    'Rhode Isl': 'Rhode Island',
+    'S Carolina St': 'South Carolina St.',
+    'S Illinois': 'Southern Illinois',
+    'S. Carolina St.': 'South Carolina St.',
+    'SE Lousiana': 'Southeastern La.',
+    'SE Missouri St': 'Southeast Missouri St.',
+    'SE Missouri St.': 'Southeast Missouri St.',
+    'SE Missouri State': 'Southeast Missouri St.',
+    'SEMO': 'Southeast Missouri St.',
+    'SF Austin': 'Stephen F. Austin',
+    'SFA': 'Stephen F. Austin',
+    'SIU Edwardsville': 'SIU-Edwardsville',
+    'SIUE': 'SIU-Edwardsville',
+    'Saint Francis': 'St. Francis (PA)',
+    'Saint Francis (PA)': 'St. Francis (PA)',
+    'Saint Francis U': 'St. Francis (PA)',
+    "Saint John's": "St. John's (NY)",
+    'Sam Houston': 'Sam Houston St.',
+    'Sam Houston St': 'Sam Houston St.',
+    'Sam Houston State': 'Sam Houston St.',
+    'So Dakota State': 'South Dakota St.',
+    'So. Dakota State': 'South Dakota St.',
+    'South Carolina State': 'South Carolina St.',
+    'South Dakota St': 'South Dakota St.',
+    'South Dakota State': 'South Dakota St.',
+    'Southeast Missouri State': 'Southeast Missouri St.',
+    'Southeastern LA': 'Southeastern La.',
+    'Southeastern La': 'Southeastern La.',
+    'Southeastern Louisiana': 'Southeastern La.',
+    'Southern': 'Southern U.',
+    'Southern Univ': 'Southern U.',
+    'Southern University': 'Southern U.',
+    "St John's": "St. John's (NY)",
+    'St. Francis': 'St. Francis (PA)',
+    "St. John's": "St. John's (NY)",
+    'Stephen F Austin': 'Stephen F. Austin',
+    'TAM C. Christi': 'Texas A&M-Corpus Christi',
+    'Tarleton': 'Tarleton St.',
+    'Tarleton St': 'Tarleton St.',
+    'Tarleton State': 'Tarleton St.',
+    'Tex. A&M-Commerce': 'Texas A&M-Commerce',
+    'Texas A&M CC': 'Texas A&M-Corpus Christi',
+    'Texas A&M Corpus Chris': 'Texas A&M-Corpus Christi',
+    'Texas A&M Corpus Christi': 'Texas A&M-Corpus Christi',
+    'Texas A&M-CC': 'Texas A&M-Corpus Christi',
+    'Texas Christian': 'TCU',
+    'Texas So': 'Texas Southern',
+    'Texas So.': 'Texas Southern',
+    'Towson (MMMT)': 'Towson',
+    'Towson MMMT': 'Towson',
+    'UAB': 'Alabama-Birmingham',
+    'UCD': 'UC Davis',
+    'UCSB': 'UC Santa Barbara',
+    'UConn': 'Connecticut',
+    'UIW': 'Incarnate Word',
+    'UL Lafayette': 'Louisiana-Lafayette',
+    'UMES': 'Maryland-Eastern Shore',
+    'UMKC': 'Kansas City',
+    'UNCG': 'UNC Greensboro',
+    'UNCW': 'UNC Wilmington',
+    'URI': 'Rhode Island',
+    'USC': 'Southern California',
+    'UTRGV': 'UT Rio Grande Valley',
+    'Univ Southern California': 'Southern California',
+    'Univ. of Southern California': 'Southern California',
+    'Utah St': 'Utah St.',
+    'Utah State': 'Utah St.',
+    'W Carolina': 'Western Carolina',
+    'W Illinois': 'Western Illinois',
+    'W Michigan': 'Western Michigan',
+    'W. Carolina': 'Western Carolina',
+    'W. Illinois': 'Western Illinois',
+    'W. Michigan': 'Western Michigan',
+    'Western Caro.': 'Western Carolina',
+    'Wichita St': 'Wichita St.',
+    'Wichita State': 'Wichita St.',
+    'abilchristian': 'Abilene Christian',
+    'abilenechristian': 'Abilene Christian',
+    'arizonast': 'Arizona St.',
+    'arizonastate': 'Arizona St.',
+    'calbaptist': 'Cal Baptist',
+    'calstbakersfield': 'Cal St. Bakersfield',
+    'centmichigan': 'Central Michigan',
+    'centralmichigan': 'Central Michigan',
+    'charlestonso': 'Charleston Southern',
+    'charlestonsouthern': 'Charleston Southern',
+    'coastalcarolina': 'Coastal Carolina',
+    'coastcarolina': 'Coastal Carolina',
+    'coppinstate': 'Coppin St.',
+    'csubakersfield': 'Cal St. Bakersfield',
+    'easternillinois': 'Eastern Ilinois',
+    'eillinois': 'Eastern Ilinois',
+    'illinoisst': 'Illinois St.',
+    'illinoisstate': 'Illinois St.',
+    'indianast': 'Indiana St.',
+    'iuindy': 'IU Indianapolis',
+    'jacksonvillestate': 'Jacksonville St.',
+    'mcneese': 'McNeese St.',
+    'mississippi': 'Mississippi',
+    'mississippivalleystate': 'Mississippi Valley State',
+    'norfolkstate': 'Norfolk St.',
+    'olemiss': 'Mississippi',
+    'rhodeisland': 'Rhode Island',
+    'sfa': 'Stephen F. Austin',
+    'tarletonst': 'Tarleton St.',
+    'towsonmnmt': 'Towson',
+    'umes': 'Maryland-Eastern Shore',
+    'usc': 'Southern California',
+    'utahtech': 'Utah Tech',
+    'westernillinois': 'Western Illinois',
+    'willinois': 'Western Illinois',
+    'American University': 'American',
+    'App State': 'Appalachian St.',
+    'Alcorn State': 'Alcorn St.',
+    'UL Monroe': 'Louisiana-Monroe',
+    'North Dakota': 'North Dakota',
+
+}
+
+def norm(name):
+    if not name: return name
+    s = str(name).strip()
+    return CBBD_TO_TORVIK.get(s, s)
+
+def db():
+    conn = sqlite3.connect(DB)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def gap(a, b):
+    try:
+        if a is not None and b is not None:
+            return float(a) - float(b)
+    except: pass
+    return None
+
+def tbl_exists(conn, name):
+    return conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone()[0] > 0
+
+
+# ── loaders ─────────────────────────────────
+
+def load_kenpom(conn):
+    if not tbl_exists(conn, 'kenpom_ratings'): return {}
+    try:
+        rows = conn.execute("""
+            SELECT season, team, adj_em, adj_o, adj_d, adj_t
+            FROM kenpom_ratings
+        """).fetchall()
+        out = {}
+        for r in rows:
+            out[(int(r[0]), norm(r[1]))] = {
+                'kp_em': r[2], 'kp_o': r[3], 'kp_d': r[4], 'kp_t': r[5]
+            }
+        print(f"  KenPom: {len(out)} (season, team) entries")
+        return out
+    except Exception as e:
+        print(f"  KenPom WARNING: {e}")
+        return {}
+
+def load_torvik_season(conn):
+    if not tbl_exists(conn, 'torvik_season'): return {}
+    try:
+        rows = conn.execute("SELECT * FROM torvik_season").fetchall()
+        out = {}
+        for r in rows:
+            d = dict(r)
+            out[(int(d['season']), norm(d['team']))] = {f'tv_{k}': v for k, v in d.items()
+                                                         if k not in ('season','team')}
+        print(f"  Torvik season: {len(out)} entries")
+        return out
+    except Exception as e:
+        print(f"  Torvik season WARNING: {e}")
+        return {}
+
+def load_torvik_daily(conn):
+    if not tbl_exists(conn, 'torvik_daily'): return pd.DataFrame()
+    try:
+        # Parse snapshot_date stored as YYYYMMDD string -> proper datetime
+        df = pd.read_sql(
+            "SELECT season, team, adj_o, adj_d, adj_t, barthag, adj_em, "
+            "efg_o, efg_d, tov_o, tov_d, orb, drb, ftr_o, ftr_d, "
+            "SUBSTR(snapshot_date,1,4)||'-'||SUBSTR(snapshot_date,5,2)||'-'||SUBSTR(snapshot_date,7,2) AS snapshot_date "
+            "FROM torvik_daily", conn)
+        df['team'] = df['team'].apply(norm)
+        df['snapshot_date'] = pd.to_datetime(df['snapshot_date'])
+        df['season'] = df['season'].astype(int)
+        df = df.sort_values('snapshot_date').reset_index(drop=True)
+        print(f"  Torvik daily: {len(df)} snapshots")
+        return df
+    except Exception as e:
+        print(f"  Torvik daily WARNING: {e}")
+        return pd.DataFrame()
+
+def load_torvik_preds(conn):
+    if not tbl_exists(conn, 'torvik_game_preds'): return pd.DataFrame()
+    try:
+        df = pd.read_sql("SELECT * FROM torvik_game_preds", conn)
+        df['home_team'] = df['home_team'].apply(norm)
+        df['away_team'] = df['away_team'].apply(norm)
+        df['game_date'] = pd.to_datetime(df['game_date'])
+        print(f"  Torvik preds: {len(df)} games")
+        return df
+    except Exception as e:
+        print(f"  Torvik preds WARNING: {e}")
+        return pd.DataFrame()
+
+def load_haslametrics(conn):
+    if not tbl_exists(conn, 'haslametrics'): return {}
+    try:
+        rows = conn.execute(
+            "SELECT * FROM haslametrics"
+        ).fetchall()
+        out = {}
+        for r in rows:
+            d = dict(r)
+            key = (int(d['season']), norm(d['team']))
+            out[key] = {f'ha_{k}': v for k, v in d.items()
+                        if k not in ('season','team','abbr','conf','wins','losses')}
+        print(f"  Haslametrics: {len(out)} entries")
+        return out
+    except Exception as e:
+        print(f"  Haslametrics WARNING: {e}")
+        return {}
+
+def load_games(conn):
+    df = pd.read_sql("""
+        SELECT id, season, game_date, home_team, away_team,
+       home_score, away_score,
+       CAST(neutral_site AS INTEGER) as neutral_site,
+       CAST(conf_game AS INTEGER) as conf_game,
+       (home_score - away_score) as actual_margin
+FROM games
+WHERE home_score IS NOT NULL AND away_score IS NOT NULL
+    """, conn)
+    df['home_team'] = df['home_team'].apply(norm)
+    df['away_team'] = df['away_team'].apply(norm)
+    df['game_date'] = pd.to_datetime(df['game_date'])
+    print(f"  Games: {len(df)}")
+    return df
+
+def load_lines(conn):
+    try:
+        df = pd.read_sql("""
+            SELECT game_id,
+                   AVG(spread) as spread,
+                   MIN(spread_open) as spread_open
+            FROM game_lines
+            GROUP BY game_id
+        """, conn)
+        print(f"  Lines: {len(df)}")
+        return df.set_index('game_id')
+    except Exception as e:
+        print(f"  Lines WARNING: {e}")
+        return pd.DataFrame()
+
+def load_stats(conn):
+    if not tbl_exists(conn, 'game_team_stats'): return pd.DataFrame()
+    try:
+        df = pd.read_sql("""
+            SELECT s.game_id, s.team, s.points,
+                   s.fg_made, s.fg_att,
+                   s.three_made, s.three_att,
+                   s.ft_made, s.ft_att,
+                   s.off_rebounds, s.def_rebounds, s.turnovers,
+                   g.game_date, g.season
+            FROM game_team_stats s
+            JOIN games g ON s.game_id = g.id
+            WHERE s.points IS NOT NULL
+            ORDER BY g.game_date
+        """, conn)
+        df['team'] = df['team'].apply(norm)
+        df['game_date'] = pd.to_datetime(df['game_date'])
+        print(f"  Box scores: {len(df)}")
+        return df
+    except Exception as e:
+        print(f"  Stats WARNING: {e}")
+        return pd.DataFrame()
+
+
+# ── rolling stats ────────────────────────────
+
+def build_rolling(stats_df, window=10):
+    if stats_df.empty: return {}
+    df = stats_df.copy()
+    df['fga'] = df['fg_att'].fillna(0)
+    df['fgm'] = df['fg_made'].fillna(0)
+    df['tpa'] = df['three_att'].fillna(0)
+    df['tpm'] = df['three_made'].fillna(0)
+    df['fta'] = df['ft_att'].fillna(0)
+    df['orb'] = df['off_rebounds'].fillna(0)
+    df['drb'] = df['def_rebounds'].fillna(0)
+    df['tov'] = df['turnovers'].fillna(0)
+    df['pts'] = df['points'].fillna(0)
+
+    df['efg'] = np.where(df['fga']>0, (df['fgm']+0.5*df['tpm'])/df['fga'], np.nan)
+    df['poss'] = df['fga'] - df['orb'] + df['tov'] + 0.475*df['fta']
+    df['tov_pct'] = np.where(df['poss']>0, df['tov']/df['poss'], np.nan)
+    df['orb_pct'] = np.where((df['orb']+df['drb'])>0, df['orb']/(df['orb']+df['drb']), np.nan)
+    df['ftr'] = np.where(df['fga']>0, df['fta']/df['fga'], np.nan)
+    df['ppp'] = np.where(df['poss']>0, df['pts']/df['poss'], np.nan)
+
+    result = {}
+    for team, grp in df.groupby('team'):
+        grp = grp.sort_values('game_date').reset_index(drop=True)
+        for i, row in grp.iterrows():
+            prior = grp.iloc[max(0, i-window):i]
+            if len(prior) < 3: continue
+            result[(team, row['game_date'])] = {
+                'r_efg':     prior['efg'].mean(),
+                'r_tov':     prior['tov_pct'].mean(),
+                'r_orb':     prior['orb_pct'].mean(),
+                'r_ftr':     prior['ftr'].mean(),
+                'r_ppp':     prior['ppp'].mean(),
+                'r_pts':     prior['pts'].mean(),
+                'r_n':       len(prior),
+            }
+    return result
+
+
+# ── home court ───────────────────────────────
+
+def build_hca(games_df):
+    hca = {}
+    for test_s in games_df['season'].unique():
+        train = games_df[(games_df['season'] != test_s) & (~games_df['neutral_site'].astype(bool))]
+        for venue, grp in train.groupby('home_team'):
+            if len(grp) >= 10:
+                hca[(int(test_s), venue)] = float(grp['actual_margin'].mean())
+    return hca
+
+
+# ── rest ─────────────────────────────────────
+
+def build_rest(games_df):
+    rest = {}
+    all_games = pd.concat([
+        games_df[['home_team','game_date']].rename(columns={'home_team':'team'}),
+        games_df[['away_team','game_date']].rename(columns={'away_team':'team'}),
+    ]).sort_values(['team','game_date'])
+
+    for team, grp in all_games.groupby('team'):
+        dates = grp['game_date'].tolist()
+        for i, d in enumerate(dates):
+            rest[(team, d)] = min((d - dates[i-1]).days, 14) if i > 0 else 7
+    return rest
+
+
+# ── torvik daily lookup ───────────────────────
+
+def torvik_as_of(td_df, team, gdate, season):
+    if td_df.empty: return None
+    # Normalize gdate to remove any tz info for clean comparison
+    gdate_norm = pd.Timestamp(gdate).normalize()
+    mask = (td_df['team']==team) & (td_df['season']==int(season)) & (td_df['snapshot_date']<gdate_norm)
+    cands = td_df[mask]
+    if cands.empty: return None
+    return cands.loc[cands['snapshot_date'].idxmax()]
+
+
+# ── main ─────────────────────────────────────
+
+def build_features():
+    conn = db()
+    print("Loading data sources...")
+
+    games    = load_games(conn)
+    lines    = load_lines(conn)
+    kenpom   = load_kenpom(conn)
+    tv_s     = load_torvik_season(conn)
+    tv_d     = load_torvik_daily(conn)
+    tv_p     = load_torvik_preds(conn)
+    hasla    = load_haslametrics(conn)
+    stats    = load_stats(conn)
+
+    print("Computing derived data...")
+    rolling  = build_rolling(stats)
+    hca      = build_hca(games)
+    rest_map = build_rest(games)
+
+    # Join lines
+    if not lines.empty:
+        games = games.join(lines, on='id', how='left')
+    else:
+        games['spread'] = np.nan
+        games['spread_open'] = np.nan
+
+    rows = []
+    print(f"Building {len(games):,} feature rows...")
+
+    for _, g in games.iterrows():
+        s    = int(g['season'])
+        home = g['home_team']
+        away = g['away_team']
+        gd   = g['game_date']
+        am   = g['actual_margin']
+        if pd.isna(am): continue
+
+        spread = g.get('spread') if pd.notna(g.get('spread')) else None
+        spread_open = g.get('spread_open') if pd.notna(g.get('spread_open')) else None
+
+        r = {
+            'game_id': g['id'], 'season': s, 'game_date': str(gd.date()),
+            'home_team': home, 'away_team': away,
+            'actual_margin': am, 'spread': spread, 'spread_open': spread_open,
+            'neutral_site': int(bool(g.get('neutral_site',0))),
+            'conf_game': int(bool(g.get('conf_game',0))),
+        }
+
+        # ── KenPom (prior season) ──
+        for side, team in [('h',home),('a',away)]:
+            kp = kenpom.get((s-1, team), {})
+            for k in ['kp_em','kp_o','kp_d','kp_t']:
+                r[f'{side}_{k}'] = kp.get(k)
+        r['kp_em_gap'] = gap(r['h_kp_em'], r['a_kp_em'])
+        r['kp_o_gap']  = gap(r['h_kp_o'],  r['a_kp_o'])
+        r['kp_d_gap']  = gap(r['h_kp_d'],  r['a_kp_d'])
+
+        # ── Torvik season (prior season) ──
+        tv_keys = ['tv_adj_em','tv_adj_o','tv_adj_d','tv_adj_t','tv_barthag',
+                   'tv_efg_o','tv_efg_d','tv_tov_o','tv_tov_d','tv_orb','tv_drb',
+                   'tv_ftr_o','tv_ftr_d','tv_two_p_o','tv_two_p_d',
+                   'tv_three_p_o','tv_three_p_d','tv_blk_pct','tv_ast_pct',
+                   'tv_avg_hgt','tv_experience','tv_pake','tv_pase',
+                   'tv_talent','tv_elite_sos','tv_wab']
+        for side, team in [('h',home),('a',away)]:
+            tv = tv_s.get((s-1, team), {})
+            for k in tv_keys:
+                r[f'{side}_{k}'] = tv.get(k)
+        r['tv_em_gap']      = gap(r['h_tv_adj_em'],    r['a_tv_adj_em'])
+        r['tv_barthag_gap'] = gap(r['h_tv_barthag'],   r['a_tv_barthag'])
+        r['tv_efg_gap']     = gap(r['h_tv_efg_o'],     r['a_tv_efg_o'])
+        r['tv_tov_gap']     = gap(r['h_tv_tov_o'],     r['a_tv_tov_o'])
+        r['tv_orb_gap']     = gap(r['h_tv_orb'],       r['a_tv_orb'])
+        r['tv_height_gap']  = gap(r['h_tv_avg_hgt'],   r['a_tv_avg_hgt'])
+        r['tv_exp_gap']     = gap(r['h_tv_experience'],r['a_tv_experience'])
+        r['tv_talent_gap']  = gap(r['h_tv_talent'],    r['a_tv_talent'])
+        r['tv_wab_gap']     = gap(r['h_tv_wab'],       r['a_tv_wab'])
+
+        # ── Torvik daily snapshot (as-of game date) ──
+        tvd_keys = ['adj_o','adj_d','adj_t','barthag','adj_em',
+                    'efg_o','efg_d','tov_o','tov_d','orb','drb','ftr_o','ftr_d']
+        for side, team in [('h',home),('a',away)]:
+            snap = torvik_as_of(tv_d, team, gd, s)
+            for k in tvd_keys:
+                r[f'{side}_tvd_{k}'] = float(snap[k]) if snap is not None and snap.get(k) is not None else None
+        r['tvd_em_gap']  = gap(r.get('h_tvd_adj_em'),  r.get('a_tvd_adj_em'))
+        r['tvd_efg_gap'] = gap(r.get('h_tvd_efg_o'),   r.get('a_tvd_efg_o'))
+        r['tvd_bar_gap'] = gap(r.get('h_tvd_barthag'), r.get('a_tvd_barthag'))
+
+        # ── Torvik game predictions ──
+        if not tv_p.empty:
+            tp_mask = ((tv_p['season']==s) & (tv_p['game_date']==gd) &
+                       (tv_p['home_team']==home) & (tv_p['away_team']==away))
+            tp_rows = tv_p[tp_mask]
+            if not tp_rows.empty:
+                tp = tp_rows.iloc[0]
+                r['torvik_pred'] = tp.get('torvik_margin')
+                r['torvik_prob'] = tp.get('torvik_win_prob')
+                r['torvik_vs_spread'] = gap(tp.get('torvik_margin'), spread) if spread else None
+            else:
+                r['torvik_pred'] = r['torvik_prob'] = r['torvik_vs_spread'] = None
+
+        # ── Haslametrics (prior season) ──
+        # Keys match actual DB column names (prefixed ha_ by loader)
+        ha_keys = ['ha_o_eff','ha_o_pace','ha_o_ftar','ha_o_ft_pct',
+                   'ha_d_eff','ha_d_pace','ha_d_ftar','ha_d_ft_pct',
+                   'ha_sos','ha_mom','ha_mom_o','ha_mom_d',
+                   'ha_rq','ha_afh','ha_asr','ha_rk_1','ha_rk_7','ha_rk_30']
+        for side, team in [('h',home),('a',away)]:
+            ha = hasla.get((s-1, team), {})
+            for k in ha_keys:
+                r[f'{side}_{k}'] = ha.get(k)
+        r['ha_o_eff_gap']  = gap(r['h_ha_o_eff'],  r['a_ha_o_eff'])
+        r['ha_d_eff_gap']  = gap(r['h_ha_d_eff'],  r['a_ha_d_eff'])
+        r['ha_sos_gap']    = gap(r['h_ha_sos'],     r['a_ha_sos'])
+        r['ha_mom_gap']    = gap(r['h_ha_mom'],     r['a_ha_mom'])
+        r['ha_rk1_gap']    = gap(r['h_ha_rk_1'],   r['a_ha_rk_1'])
+        r['ha_rk7_gap']    = gap(r['h_ha_rk_7'],   r['a_ha_rk_7'])
+        # Use ha_o_eff_gap as the summary metric for coverage reporting
+        r['ha_eff_gap']    = r['ha_o_eff_gap']
+
+        # ── Rolling box score ──
+        for side, team in [('h',home),('a',away)]:
+            rv = rolling.get((team, gd), {})
+            for k in ['r_efg','r_tov','r_orb','r_ftr','r_ppp','r_pts']:
+                r[f'{side}_{k}'] = rv.get(k)
+        r['roll_ppp_gap'] = gap(r.get('h_r_ppp'), r.get('a_r_ppp'))
+        r['roll_efg_gap'] = gap(r.get('h_r_efg'), r.get('a_r_efg'))
+        r['roll_pts_gap'] = gap(r.get('h_r_pts'), r.get('a_r_pts'))
+
+        # ── Home court ──
+        r['hca']     = hca.get((s, home), 3.2)
+        r['hca_adj'] = r['hca'] if not r['neutral_site'] else 0.0
+
+        # ── Rest ──
+        hr = rest_map.get((home, gd), 4)
+        ar = rest_map.get((away, gd), 4)
+        r['home_rest'] = hr
+        r['away_rest'] = ar
+        r['rest_diff'] = hr - ar
+        r['home_b2b']  = int(hr <= 1)
+        r['away_b2b']  = int(ar <= 1)
+
+        # ── Line movement ──
+        if spread is not None and spread_open is not None:
+            try: r['line_move'] = float(spread) - float(spread_open)
+            except: r['line_move'] = None
+        else:
+            r['line_move'] = None
+
+        rows.append(r)
+
+    df = pd.DataFrame(rows)
+
+    # ATS result
+    df['ats_win'] = np.where(
+        df['spread'].notna(),
+        ((df['actual_margin'] + df['spread']) > 0).astype(float),
+        np.nan
+    )
+
+    # Save
+    df.to_sql('game_features_v2', conn, if_exists='replace', index=False)
+    conn.close()
+
+    print(f"\n✅ Saved {len(df):,} rows → game_features_v2")
+    print(f"   Columns: {len(df.columns)}")
+    print(f"   With spread: {df['spread'].notna().sum():,}")
+    print(f"   With torvik daily: {df['tvd_em_gap'].notna().sum():,}")
+    print(f"   With haslametrics: {df['ha_o_eff_gap'].notna().sum():,}")
+    print(f"   With torvik pred:  {df['torvik_pred'].notna().sum():,}")
+    return df
+
+
+if __name__ == '__main__':
+    print("="*60)
+    print("NCAAB Model — Feature Engineering (All Sources)")
+    print("="*60)
+    build_features()
+    print("\nNext: python scripts/05_backtest_all_combos.py")
