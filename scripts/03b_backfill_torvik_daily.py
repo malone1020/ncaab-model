@@ -76,7 +76,7 @@ def fetch_snapshot(snap_date_str, season, cur):
             adj_t = fv(td[DAILY_IDX['adj_t']]) if len(td) > DAILY_IDX['adj_t'] else None
             batch.append((
                 season, snap_date_str, team,
-                adj_o, adj_d, adj_t,
+                adj_o, adj_d,
                 fv(td[DAILY_IDX['barthag']]),
                 (adj_o - adj_d) if adj_o is not None and adj_d is not None else None,
                 fv(td[DAILY_IDX['efg_o']]), fv(td[DAILY_IDX['efg_d']]),
@@ -88,9 +88,9 @@ def fetch_snapshot(snap_date_str, season, cur):
         if batch:
             cur.executemany("""
                 INSERT OR IGNORE INTO torvik_daily
-                (season, snapshot_date, team, adj_o, adj_d, adj_t, barthag, adj_em,
+                (season, snapshot_date, team, adj_o, adj_d, barthag, adj_em,
                  efg_o, efg_d, tov_o, tov_d, orb, drb, ftr_o, ftr_d)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, batch)
             cur.connection.commit()
         return len(batch), 'ok'
