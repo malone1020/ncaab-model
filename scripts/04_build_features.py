@@ -793,7 +793,7 @@ def load_rolling(conn):
     """
     if not tbl_exists(conn, 'rolling_efficiency'): return {}
     try:
-        df = pd.read_sql("SELECT game_date, team, * FROM rolling_efficiency", conn)
+        df = pd.read_sql("SELECT * FROM rolling_efficiency", conn)
         df['team'] = df['team'].apply(norm)
         # Normalize date to YYYY-MM-DD string (strip time component if any)
         df['game_date'] = df['game_date'].astype(str).str[:10]
@@ -926,14 +926,6 @@ def build_features():
 
         # ── KenPom fanmatch predictions ──
         gd_str = str(gd.date()) if hasattr(gd, 'date') else str(gd)[:10]
-
-        # DEBUG: first game only — show what rolling lookup key looks like
-        if _ == games.index[0] and rolling:
-            sample_rolling_key = next(iter(rolling.keys()))
-            print(f"  [DEBUG] game loop gd_str='{gd_str}', home='{home}'")
-            print(f"  [DEBUG] sample rolling key: {sample_rolling_key}")
-            lookup_key = (gd_str, home)
-            print(f"  [DEBUG] trying rolling.get({lookup_key}) → {'HIT' if lookup_key in rolling else 'MISS'}")
         fm = kp_fm.get((gd_str, home, away))
         if fm is None:
             # Try reverse (home/away may be flipped in fanmatch)
