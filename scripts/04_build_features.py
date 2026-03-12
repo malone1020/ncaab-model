@@ -650,6 +650,96 @@ def torvik_as_of(td_index, team, gdate, season):
 
 # ── main ─────────────────────────────────────
 
+
+def load_kenpom_daily(conn):
+    """Load kenpom_daily into indexed dict — same pattern as torvik_daily."""
+    if not tbl_exists(conn, 'kenpom_daily'): return {}
+    try:
+        df = pd.read_sql("""
+            SELECT season, snapshot_date, team,
+                   adj_em, adj_o, adj_d, adj_tempo, luck,
+                   sos, sos_o, sos_d, ncsос, rank_adj_em, pythag
+            FROM kenpom_daily
+        """, conn)
+        df['team'] = df['team'].apply(norm)
+        df['season'] = df['season'].astype(int)
+        def snap_to_int(s):
+            return int(str(s).strip().replace('-','')[:8])
+        df['snap_int'] = df['snapshot_date'].apply(snap_to_int)
+        cols = ['adj_em','adj_o','adj_d','adj_tempo','luck',
+                'sos','sos_o','sos_d','ncsос','rank_adj_em','pythag']
+        index = {}
+        for (season, team), grp in df.groupby(['season','team']):
+            grp_s = grp.sort_values('snap_int')
+            index[(int(season), team)] = list(zip(
+                grp_s['snap_int'].tolist(),
+                grp_s[cols].to_dict('records')
+            ))
+        print(f"  KenPom daily: {len(df):,} snapshots, {len(index):,} (season,team) keys")
+        return index
+    except Exception as e:
+        print(f"  KenPom daily WARNING: {e}")
+        return {}
+
+
+def kenpom_as_of(kpd_index, team, gdate, season):
+    """Identical binary search as torvik_as_of."""
+    if not kpd_index: return None
+    snaps = kpd_index.get((int(season), team))
+    if not snaps: return None
+    if hasattr(gdate, 'strftime'):
+        gdate_int = int(gdate.strftime('%Y%m%d'))
+    else:
+        gdate_int = int(str(gdate).replace('-','')[:8])
+    lo, hi, result = 0, len(snaps)-1, None
+    while lo <= hi:
+        mid = (lo+hi)//2
+        if snaps[mid][0] < gdate_int:
+            result = snaps[mid][1]
+            lo = mid+1
+        else:
+            hi = mid-1
+    return result
+
+
+def load_kenpom_fanmatch(conn):
+    """Load fanmatch predictions keyed by (game_date_str, home_team, away_team)."""
+    if not tbl_exists(conn, 'kenpom_fanmatch'): return {}
+    try:
+        df = pd.read_sql("""
+            SELECT season, game_date, home_team, away_team,
+                   home_rank, away_rank, home_pred, away_pred,
+                   home_wp, pred_tempo, thrill_score
+            FROM kenpom_fanmatch
+        """, conn)
+        df['home_team'] = df['home_team'].apply(norm)
+        df['away_team'] = df['away_team'].apply(norm)
+        index = {}
+        for _, row in df.iterrows():
+            key = (row['game_date'], row['home_team'], row['away_team'])
+            index[key] = row.to_dict()
+        print(f"  KenPom fanmatch: {len(index):,} game predictions")
+        return index
+    except Exception as e:
+        print(f"  KenPom fanmatch WARNING: {e}")
+        return {}
+
+
+def load_rolling(conn):
+    """Load rolling_efficiency into indexed dict keyed by (game_date_str, team)."""
+    if not tbl_exists(conn, 'rolling_efficiency'): return {}
+    try:
+        df = pd.read_sql("SELECT * FROM rolling_efficiency", conn)
+        df['team'] = df['team'].apply(norm)
+        index = {}
+        for _, row in df.iterrows():
+            index[(row['game_date'], row['team'])] = row.to_dict()
+        print(f"  Rolling efficiency: {len(index):,} (date,team) entries")
+        return index
+    except Exception as e:
+        print(f"  Rolling efficiency WARNING: {e}")
+        return {}
+
 def build_features():
     conn = db()
     print("Loading data sources...")
@@ -941,94 +1031,3 @@ if __name__ == '__main__':
     print("\nNext: python scripts/05_backtest_all_combos.py")
 
 # ═══════════════════════════════════════════════════════════════════
-# NEW LOADERS — appended by Phase 2 build
-# ═══════════════════════════════════════════════════════════════════
-
-def load_kenpom_daily(conn):
-    """Load kenpom_daily into indexed dict — same pattern as torvik_daily."""
-    if not tbl_exists(conn, 'kenpom_daily'): return {}
-    try:
-        df = pd.read_sql("""
-            SELECT season, snapshot_date, team,
-                   adj_em, adj_o, adj_d, adj_tempo, luck,
-                   sos, sos_o, sos_d, ncsос, rank_adj_em, pythag
-            FROM kenpom_daily
-        """, conn)
-        df['team'] = df['team'].apply(norm)
-        df['season'] = df['season'].astype(int)
-        def snap_to_int(s):
-            return int(str(s).strip().replace('-','')[:8])
-        df['snap_int'] = df['snapshot_date'].apply(snap_to_int)
-        cols = ['adj_em','adj_o','adj_d','adj_tempo','luck',
-                'sos','sos_o','sos_d','ncsос','rank_adj_em','pythag']
-        index = {}
-        for (season, team), grp in df.groupby(['season','team']):
-            grp_s = grp.sort_values('snap_int')
-            index[(int(season), team)] = list(zip(
-                grp_s['snap_int'].tolist(),
-                grp_s[cols].to_dict('records')
-            ))
-        print(f"  KenPom daily: {len(df):,} snapshots, {len(index):,} (season,team) keys")
-        return index
-    except Exception as e:
-        print(f"  KenPom daily WARNING: {e}")
-        return {}
-
-
-def kenpom_as_of(kpd_index, team, gdate, season):
-    """Identical binary search as torvik_as_of."""
-    if not kpd_index: return None
-    snaps = kpd_index.get((int(season), team))
-    if not snaps: return None
-    if hasattr(gdate, 'strftime'):
-        gdate_int = int(gdate.strftime('%Y%m%d'))
-    else:
-        gdate_int = int(str(gdate).replace('-','')[:8])
-    lo, hi, result = 0, len(snaps)-1, None
-    while lo <= hi:
-        mid = (lo+hi)//2
-        if snaps[mid][0] < gdate_int:
-            result = snaps[mid][1]
-            lo = mid+1
-        else:
-            hi = mid-1
-    return result
-
-
-def load_kenpom_fanmatch(conn):
-    """Load fanmatch predictions keyed by (game_date_str, home_team, away_team)."""
-    if not tbl_exists(conn, 'kenpom_fanmatch'): return {}
-    try:
-        df = pd.read_sql("""
-            SELECT season, game_date, home_team, away_team,
-                   home_rank, away_rank, home_pred, away_pred,
-                   home_wp, pred_tempo, thrill_score
-            FROM kenpom_fanmatch
-        """, conn)
-        df['home_team'] = df['home_team'].apply(norm)
-        df['away_team'] = df['away_team'].apply(norm)
-        index = {}
-        for _, row in df.iterrows():
-            key = (row['game_date'], row['home_team'], row['away_team'])
-            index[key] = row.to_dict()
-        print(f"  KenPom fanmatch: {len(index):,} game predictions")
-        return index
-    except Exception as e:
-        print(f"  KenPom fanmatch WARNING: {e}")
-        return {}
-
-
-def load_rolling(conn):
-    """Load rolling_efficiency into indexed dict keyed by (game_date_str, team)."""
-    if not tbl_exists(conn, 'rolling_efficiency'): return {}
-    try:
-        df = pd.read_sql("SELECT * FROM rolling_efficiency", conn)
-        df['team'] = df['team'].apply(norm)
-        index = {}
-        for _, row in df.iterrows():
-            index[(row['game_date'], row['team'])] = row.to_dict()
-        print(f"  Rolling efficiency: {len(index):,} (date,team) entries")
-        return index
-    except Exception as e:
-        print(f"  Rolling efficiency WARNING: {e}")
-        return {}
