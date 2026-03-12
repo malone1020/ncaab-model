@@ -662,6 +662,9 @@ def build_features():
     tv_p     = load_torvik_preds(conn)
     hasla    = load_haslametrics(conn)
     stats    = load_stats(conn)
+    kpd      = load_kenpom_daily(conn)
+    kp_fm    = load_kenpom_fanmatch(conn)
+    rolling  = load_rolling(conn)
 
     print("Computing derived data...")
     rolling  = build_rolling(stats)
@@ -749,6 +752,68 @@ def build_features():
         # Use barthag (100% populated) as primary TVD presence flag
         r['has_tvd_home'] = int(r.get('h_tvd_barthag') is not None)
         r['has_tvd_away'] = int(r.get('a_tvd_barthag') is not None)
+
+        # ── KenPom daily (as-of game date) ──
+        kpd_keys = ['adj_em','adj_o','adj_d','adj_tempo','luck',
+                    'sos','sos_o','sos_d','rank_adj_em','pythag']
+        for side, team in [('h',home),('a',away)]:
+            snap = kenpom_as_of(kpd, team, gd, s)
+            for k in kpd_keys:
+                val = snap.get(k) if snap is not None else None
+                r[f'{side}_kpd_{k}'] = float(val) if val is not None else None
+        r['kpd_em_gap']   = gap(r.get('h_kpd_adj_em'), r.get('a_kpd_adj_em'))
+        r['kpd_luck_gap'] = gap(r.get('h_kpd_luck'),   r.get('a_kpd_luck'))
+        r['kpd_sos_gap']  = gap(r.get('h_kpd_sos'),    r.get('a_kpd_sos'))
+        r['has_kpd_home'] = int(r.get('h_kpd_adj_em') is not None)
+        r['has_kpd_away'] = int(r.get('a_kpd_adj_em') is not None)
+
+        # ── KenPom fanmatch predictions ──
+        gd_str = str(gd.date()) if hasattr(gd, 'date') else str(gd)[:10]
+        fm = kp_fm.get((gd_str, home, away))
+        if fm is None:
+            # Try reverse (home/away may be flipped in fanmatch)
+            fm_rev = kp_fm.get((gd_str, away, home))
+            if fm_rev is not None:
+                # Flip perspective
+                r['kp_home_pred']  = fm_rev.get('away_pred')
+                r['kp_away_pred']  = fm_rev.get('home_pred')
+                r['kp_home_wp']    = 1.0 - float(fm_rev['home_wp'])/100 if fm_rev.get('home_wp') else None
+                r['kp_pred_margin']= (r['kp_home_pred'] - r['kp_away_pred']) if r['kp_home_pred'] and r['kp_away_pred'] else None
+                r['kp_pred_tempo'] = fm_rev.get('pred_tempo')
+            else:
+                r['kp_home_pred'] = r['kp_away_pred'] = r['kp_home_wp'] = None
+                r['kp_pred_margin'] = r['kp_pred_tempo'] = None
+        else:
+            r['kp_home_pred']   = fm.get('home_pred')
+            r['kp_away_pred']   = fm.get('away_pred')
+            r['kp_home_wp']     = float(fm['home_wp'])/100 if fm.get('home_wp') else None
+            r['kp_pred_margin'] = (float(fm['home_pred']) - float(fm['away_pred'])) if fm.get('home_pred') and fm.get('away_pred') else None
+            r['kp_pred_tempo']  = fm.get('pred_tempo')
+        r['has_kp_fanmatch'] = int(r.get('kp_pred_margin') is not None)
+
+        # ── Rolling box score efficiency (last 5/10 games) ──
+        for side, team in [('h',home),('a',away)]:
+            rol = rolling.get((gd_str, team))
+            if rol:
+                for k in ['r5_efg','r5_tov','r5_orb','r5_ftr','r5_3pct','r5_pace',
+                          'r5_pts_off','r5_pts_def','r5_margin',
+                          'r10_efg','r10_tov','r10_orb','r10_pace','r10_margin',
+                          'ew_efg','ew_tov','ew_orb','ew_pts_off','ew_pts_def','ew_margin',
+                          'trend_efg','trend_margin','games_played']:
+                    v = rol.get(k)
+                    r[f'{side}_rol_{k}'] = float(v) if v is not None else None
+            else:
+                for k in ['r5_efg','r5_tov','r5_orb','r5_ftr','r5_3pct','r5_pace',
+                          'r5_pts_off','r5_pts_def','r5_margin',
+                          'r10_efg','r10_tov','r10_orb','r10_pace','r10_margin',
+                          'ew_efg','ew_tov','ew_orb','ew_pts_off','ew_pts_def','ew_margin',
+                          'trend_efg','trend_margin','games_played']:
+                    r[f'{side}_rol_{k}'] = None
+        r['rol_margin_gap'] = gap(r.get('h_rol_r10_margin'), r.get('a_rol_r10_margin'))
+        r['rol_efg_gap']    = gap(r.get('h_rol_r10_efg'),    r.get('a_rol_r10_efg'))
+        r['rol_trend_gap']  = gap(r.get('h_rol_trend_margin'),r.get('a_rol_trend_margin'))
+        r['has_rol_home']   = int(r.get('h_rol_r5_margin') is not None)
+        r['has_rol_away']   = int(r.get('a_rol_r5_margin') is not None)
 
         # ── Torvik game predictions ──
         if not tv_p.empty:
@@ -857,9 +922,12 @@ def build_features():
 
     print(f"\n✅ Saved {len(df):,} rows → game_features_v2")
     print(f"   Columns: {len(df.columns)}")
-    print(f"   With spread: {df['spread'].notna().sum():,}")
-    print(f"   With over/under: {df['over_under'].notna().sum():,}")
+    print(f"   With spread:       {df['spread'].notna().sum():,}")
+    print(f"   With over/under:   {df['over_under'].notna().sum():,}")
     print(f"   With torvik daily: {df['tvd_bar_gap'].notna().sum():,}")
+    print(f"   With kenpom daily: {df['kpd_em_gap'].notna().sum():,}")
+    print(f"   With kp fanmatch:  {df['kp_pred_margin'].notna().sum():,}")
+    print(f"   With rolling:      {df['rol_margin_gap'].notna().sum():,}")
     print(f"   With haslametrics: {df['ha_eff_gap'].notna().sum():,}")
     print(f"   With torvik pred:  {df['torvik_pred'].notna().sum():,}")
     return df
@@ -871,3 +939,96 @@ if __name__ == '__main__':
     print("="*60)
     build_features()
     print("\nNext: python scripts/05_backtest_all_combos.py")
+
+# ═══════════════════════════════════════════════════════════════════
+# NEW LOADERS — appended by Phase 2 build
+# ═══════════════════════════════════════════════════════════════════
+
+def load_kenpom_daily(conn):
+    """Load kenpom_daily into indexed dict — same pattern as torvik_daily."""
+    if not tbl_exists(conn, 'kenpom_daily'): return {}
+    try:
+        df = pd.read_sql("""
+            SELECT season, snapshot_date, team,
+                   adj_em, adj_o, adj_d, adj_tempo, luck,
+                   sos, sos_o, sos_d, ncsос, rank_adj_em, pythag
+            FROM kenpom_daily
+        """, conn)
+        df['team'] = df['team'].apply(norm)
+        df['season'] = df['season'].astype(int)
+        def snap_to_int(s):
+            return int(str(s).strip().replace('-','')[:8])
+        df['snap_int'] = df['snapshot_date'].apply(snap_to_int)
+        cols = ['adj_em','adj_o','adj_d','adj_tempo','luck',
+                'sos','sos_o','sos_d','ncsос','rank_adj_em','pythag']
+        index = {}
+        for (season, team), grp in df.groupby(['season','team']):
+            grp_s = grp.sort_values('snap_int')
+            index[(int(season), team)] = list(zip(
+                grp_s['snap_int'].tolist(),
+                grp_s[cols].to_dict('records')
+            ))
+        print(f"  KenPom daily: {len(df):,} snapshots, {len(index):,} (season,team) keys")
+        return index
+    except Exception as e:
+        print(f"  KenPom daily WARNING: {e}")
+        return {}
+
+
+def kenpom_as_of(kpd_index, team, gdate, season):
+    """Identical binary search as torvik_as_of."""
+    if not kpd_index: return None
+    snaps = kpd_index.get((int(season), team))
+    if not snaps: return None
+    if hasattr(gdate, 'strftime'):
+        gdate_int = int(gdate.strftime('%Y%m%d'))
+    else:
+        gdate_int = int(str(gdate).replace('-','')[:8])
+    lo, hi, result = 0, len(snaps)-1, None
+    while lo <= hi:
+        mid = (lo+hi)//2
+        if snaps[mid][0] < gdate_int:
+            result = snaps[mid][1]
+            lo = mid+1
+        else:
+            hi = mid-1
+    return result
+
+
+def load_kenpom_fanmatch(conn):
+    """Load fanmatch predictions keyed by (game_date_str, home_team, away_team)."""
+    if not tbl_exists(conn, 'kenpom_fanmatch'): return {}
+    try:
+        df = pd.read_sql("""
+            SELECT season, game_date, home_team, away_team,
+                   home_rank, away_rank, home_pred, away_pred,
+                   home_wp, pred_tempo, thrill_score
+            FROM kenpom_fanmatch
+        """, conn)
+        df['home_team'] = df['home_team'].apply(norm)
+        df['away_team'] = df['away_team'].apply(norm)
+        index = {}
+        for _, row in df.iterrows():
+            key = (row['game_date'], row['home_team'], row['away_team'])
+            index[key] = row.to_dict()
+        print(f"  KenPom fanmatch: {len(index):,} game predictions")
+        return index
+    except Exception as e:
+        print(f"  KenPom fanmatch WARNING: {e}")
+        return {}
+
+
+def load_rolling(conn):
+    """Load rolling_efficiency into indexed dict keyed by (game_date_str, team)."""
+    if not tbl_exists(conn, 'rolling_efficiency'): return {}
+    try:
+        df = pd.read_sql("SELECT * FROM rolling_efficiency", conn)
+        df['team'] = df['team'].apply(norm)
+        index = {}
+        for _, row in df.iterrows():
+            index[(row['game_date'], row['team'])] = row.to_dict()
+        print(f"  Rolling efficiency: {len(index):,} (date,team) entries")
+        return index
+    except Exception as e:
+        print(f"  Rolling efficiency WARNING: {e}")
+        return {}
