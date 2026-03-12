@@ -788,22 +788,29 @@ def load_kenpom_fanmatch(conn):
 
 def load_rolling(conn):
     """Load rolling_efficiency into indexed dict keyed by (game_date_str, team).
-    Uses the authoritative game_date from rolling_efficiency (built from game_team_stats
-    joined to games, so dates are already in YYYY-MM-DD string format).
+    Also builds a secondary index by (team) → sorted list of (date, row) for
+    nearest-date fallback lookup (handles ±1 day drift from game_team_stats dates).
     """
     if not tbl_exists(conn, 'rolling_efficiency'): return {}
     try:
         df = pd.read_sql("SELECT * FROM rolling_efficiency", conn)
         df['team'] = df['team'].apply(norm)
-        # Normalize date to YYYY-MM-DD string (strip time component if any)
         df['game_date'] = df['game_date'].astype(str).str[:10]
+        # Primary index: exact (date, team)
         index = {}
+        # Secondary index: team → sorted [(date_int, row)]
+        team_idx = {}
         for _, row in df.iterrows():
-            index[(row['game_date'], row['team'])] = row.to_dict()
-        # Debug: show sample keys
-        sample = list(index.keys())[:3]
-        print(f"  Rolling efficiency: {len(index):,} (date,team) entries  sample keys: {sample}")
-        return index
+            d, t = row['game_date'], row['team']
+            index[(d, t)] = row.to_dict()
+            d_int = int(d.replace('-', ''))
+            if t not in team_idx:
+                team_idx[t] = []
+            team_idx[t].append((d_int, row.to_dict()))
+        for t in team_idx:
+            team_idx[t].sort(key=lambda x: x[0])
+        print(f"  Rolling efficiency: {len(index):,} (date,team) entries")
+        return {'exact': index, 'by_team': team_idx}
     except Exception as e:
         print(f"  Rolling efficiency WARNING: {e}")
         return {}
@@ -949,8 +956,41 @@ def build_features():
         r['has_kp_fanmatch'] = int(r.get('kp_pred_margin') is not None)
 
         # ── Rolling box score efficiency (last 5/10 games) ──
+        rol_exact  = rolling.get('exact', {}) if isinstance(rolling, dict) else {}
+        rol_by_team= rolling.get('by_team', {}) if isinstance(rolling, dict) else {}
+
+        def rolling_lookup(team, date_str):
+            """Exact match first; fall back to nearest prior date within 3 days."""
+            hit = rol_exact.get((date_str, team))
+            if hit is not None:
+                return hit
+            snaps = rol_by_team.get(team)
+            if not snaps:
+                return None
+            d_int = int(date_str.replace('-', ''))
+            # Binary search for latest snap <= game date
+            lo, hi, result = 0, len(snaps)-1, None
+            while lo <= hi:
+                mid = (lo+hi)//2
+                if snaps[mid][0] <= d_int:
+                    result = snaps[mid][1]
+                    lo = mid+1
+                else:
+                    hi = mid-1
+            if result is None:
+                return None
+            # Only use if within 3 days of game date
+            snap_int = result.get('game_date', '').replace('-','')
+            try:
+                gap_days = (d_int - int(snap_int)) // 1  # rough, same format
+                if abs(d_int - int(snap_int)) <= 3:
+                    return result
+            except:
+                pass
+            return None
+
         for side, team in [('h',home),('a',away)]:
-            rol = rolling.get((gd_str, team))
+            rol = rolling_lookup(team, gd_str)
             if rol:
                 for k in ['r5_efg','r5_tov','r5_orb','r5_ftr','r5_3pct','r5_pace',
                           'r5_pts_off','r5_pts_def','r5_margin',
