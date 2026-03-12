@@ -338,7 +338,7 @@ def load_torvik_daily(conn):
     try:
         # Parse snapshot_date stored as YYYYMMDD string -> proper datetime
         df = pd.read_sql(
-            "SELECT season, team, adj_o, adj_d, adj_t, barthag, adj_em, "
+            "SELECT season, team, adj_o, adj_d, barthag, adj_em, "
             "efg_o, efg_d, tov_o, tov_d, orb, drb, ftr_o, ftr_d, "
             "SUBSTR(snapshot_date,1,4)||'-'||SUBSTR(snapshot_date,5,2)||'-'||SUBSTR(snapshot_date,7,2) AS snapshot_date "
             "FROM torvik_daily", conn)
@@ -629,7 +629,7 @@ def build_features():
         r['has_tvs_away']    = int(r['a_tvs_adj_em'] is not None)
 
         # ── Torvik daily snapshot (as-of game date) ──
-        tvd_keys = ['adj_o','adj_d','adj_t','barthag','adj_em',
+        tvd_keys = ['adj_o','adj_d','barthag','adj_em',
                     'efg_o','efg_d','tov_o','tov_d','orb','drb','ftr_o','ftr_d','wab']
         for side, team in [('h',home),('a',away)]:
             snap = torvik_as_of(tv_d, team, gd, s)
@@ -751,7 +751,7 @@ def build_features():
     print(f"   Columns: {len(df.columns)}")
     print(f"   With spread: {df['spread'].notna().sum():,}")
     print(f"   With torvik daily: {df['tvd_em_gap'].notna().sum():,}")
-    print(f"   With haslametrics: {df['ha_o_eff_gap'].notna().sum():,}")
+    print(f"   With haslametrics: {df['ha_eff_gap'].notna().sum():,}")
     print(f"   With torvik pred:  {df['torvik_pred'].notna().sum():,}")
     return df
 
