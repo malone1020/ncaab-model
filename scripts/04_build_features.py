@@ -841,8 +841,8 @@ def build_features():
 
     for _, g in games.iterrows():
         s    = int(g['season'])
-        home = g['home_team']
-        away = g['away_team']
+        home = norm(g['home_team'])
+        away = norm(g['away_team'])
         gd   = pd.Timestamp(g['game_date'])  # re-cast in case merge changed dtype
         am   = g['actual_margin']
         if pd.isna(am): continue
