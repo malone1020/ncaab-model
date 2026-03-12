@@ -787,15 +787,22 @@ def load_kenpom_fanmatch(conn):
 
 
 def load_rolling(conn):
-    """Load rolling_efficiency into indexed dict keyed by (game_date_str, team)."""
+    """Load rolling_efficiency into indexed dict keyed by (game_date_str, team).
+    Uses the authoritative game_date from rolling_efficiency (built from game_team_stats
+    joined to games, so dates are already in YYYY-MM-DD string format).
+    """
     if not tbl_exists(conn, 'rolling_efficiency'): return {}
     try:
-        df = pd.read_sql("SELECT * FROM rolling_efficiency", conn)
+        df = pd.read_sql("SELECT game_date, team, * FROM rolling_efficiency", conn)
         df['team'] = df['team'].apply(norm)
+        # Normalize date to YYYY-MM-DD string (strip time component if any)
+        df['game_date'] = df['game_date'].astype(str).str[:10]
         index = {}
         for _, row in df.iterrows():
             index[(row['game_date'], row['team'])] = row.to_dict()
-        print(f"  Rolling efficiency: {len(index):,} (date,team) entries")
+        # Debug: show sample keys
+        sample = list(index.keys())[:3]
+        print(f"  Rolling efficiency: {len(index):,} (date,team) entries  sample keys: {sample}")
         return index
     except Exception as e:
         print(f"  Rolling efficiency WARNING: {e}")
@@ -919,6 +926,14 @@ def build_features():
 
         # ── KenPom fanmatch predictions ──
         gd_str = str(gd.date()) if hasattr(gd, 'date') else str(gd)[:10]
+
+        # DEBUG: first game only — show what rolling lookup key looks like
+        if _ == games.index[0] and rolling:
+            sample_rolling_key = next(iter(rolling.keys()))
+            print(f"  [DEBUG] game loop gd_str='{gd_str}', home='{home}'")
+            print(f"  [DEBUG] sample rolling key: {sample_rolling_key}")
+            lookup_key = (gd_str, home)
+            print(f"  [DEBUG] trying rolling.get({lookup_key}) → {'HIT' if lookup_key in rolling else 'MISS'}")
         fm = kp_fm.get((gd_str, home, away))
         if fm is None:
             # Try reverse (home/away may be flipped in fanmatch)
