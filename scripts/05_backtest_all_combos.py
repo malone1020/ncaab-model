@@ -149,7 +149,14 @@ def backtest_combo(group_names):
     if len(bet) < 100:
         return None
 
-    wins  = bet['ats_win'].sum()
+    # Win = model bet the right side
+    # edge > 0 means bet home; win if home covered (ats_win=1)
+    # edge < 0 means bet away; win if home did NOT cover (ats_win=0)
+    bet = bet.copy()
+    bet['bet_won'] = ((bet['edge'] > 0) & (bet['ats_win'] == 1)) |                      ((bet['edge'] < 0) & (bet['ats_win'] == 0))
+    bet['bet_won'] = bet['bet_won'].astype(int)
+
+    wins  = bet['bet_won'].sum()
     total = len(bet)
     wr    = wins / total
     roi   = (wins * PAYOUT - (total - wins)) / total
