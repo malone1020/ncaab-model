@@ -20,7 +20,7 @@ Run: python scripts/05_backtest_all_combos.py
 import sqlite3, os, json, itertools
 import pandas as pd
 import numpy as np
-from xgboost import XGBRegressor
+from xgboost import XGBClassifier
 from sklearn.impute import SimpleImputer
 
 ROOT    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -71,12 +71,40 @@ FEATURE_GROUPS = {
         'ha_3par_matchup_h','ha_3par_matchup_a',
         'ha_prox_matchup_h','ha_prox_matchup_a',
     ],
+    # ── Clean (no leakage) new sources ──────────────────────────────────────
+    'KPD': [
+        'h_kpd_adj_em','h_kpd_adj_o','h_kpd_adj_d','h_kpd_adj_tempo','h_kpd_luck',
+        'h_kpd_sos','h_kpd_sos_o','h_kpd_sos_d','h_kpd_rank_adj_em','h_kpd_pythag',
+        'a_kpd_adj_em','a_kpd_adj_o','a_kpd_adj_d','a_kpd_adj_tempo','a_kpd_luck',
+        'a_kpd_sos','a_kpd_sos_o','a_kpd_sos_d','a_kpd_rank_adj_em','a_kpd_pythag',
+        'kpd_em_gap','kpd_luck_gap','kpd_sos_gap','has_kpd_home','has_kpd_away',
+    ],
+    'KP_FANMATCH': [
+        'kp_home_pred','kp_away_pred','kp_home_wp','kp_pred_margin',
+        'kp_pred_tempo','has_kp_fanmatch',
+    ],
+    'ROLLING': [
+        'h_rol_r5_efg','h_rol_r5_tov','h_rol_r5_orb','h_rol_r5_pace',
+        'h_rol_r5_pts_off','h_rol_r5_pts_def','h_rol_r5_margin',
+        'h_rol_r10_margin','h_rol_ew_margin','h_rol_trend_margin',
+        'a_rol_r5_efg','a_rol_r5_tov','a_rol_r5_orb','a_rol_r5_pace',
+        'a_rol_r5_pts_off','a_rol_r5_pts_def','a_rol_r5_margin',
+        'a_rol_r10_margin','a_rol_ew_margin','a_rol_trend_margin',
+        'rol_margin_gap','rol_efg_gap','rol_trend_gap',
+        'has_rol_home','has_rol_away',
+    ],
 }
 
-OPTIONAL_SOURCES = ['TVS','TVD','KP','HA_CORE','HA_SHOT','HA_DELTA','HA_MATCHUP']
+# Clean sources (no look-ahead leakage) — use for primary backtest
+CLEAN_SOURCES   = ['TVD','KPD','KP_FANMATCH','ROLLING']
+# Leaky sources (season-final ratings) — kept for reference only
+LEAKY_SOURCES   = ['TVS','KP','HA_CORE','HA_SHOT','HA_DELTA','HA_MATCHUP']
+# Test all clean combos + optionally leaky for comparison
+OPTIONAL_SOURCES = CLEAN_SOURCES + LEAKY_SOURCES
 SPREAD_MIN, SPREAD_MAX = 0.5, 9.0
-EDGE_MIN   = 3.0
+EV_MIN     = 0.03       # minimum EV threshold: P(cover)*1.909 - 1 >= 0.03
 PAYOUT     = 100 / 110  # -110 juice
+JUICE_IMPL = 110 / 210  # implied prob at -110 = 52.38%
 
 # ── Load data ────────────────────────────────────────────────────────────────
 print("Loading game_features_v2...")
@@ -95,7 +123,7 @@ def backtest_combo(group_names):
                 feat_cols.append(c)
 
     seasons   = sorted(df['season'].unique())
-    min_train = 4  # need at least 4 prior seasons
+    min_train = 4
     test_seasons = [s for s in seasons if seasons.index(s) >= min_train]
     if len(test_seasons) < 2:
         return None
@@ -106,14 +134,16 @@ def backtest_combo(group_names):
         train    = df[df['season'].isin(train_ss)].copy()
         test     = df[df['season'] == test_s].copy()
 
-        # Filter to spread range
+        # Filter: spread range + must have ats_win label
         test = test[(test['spread'].abs() >= SPREAD_MIN) &
-                    (test['spread'].abs() <= SPREAD_MAX)]
-        if len(test) < 50:
+                    (test['spread'].abs() <= SPREAD_MAX) &
+                    test['ats_win'].notna()]
+        train = train[train['ats_win'].notna()]
+        if len(test) < 50 or len(train) < 200:
             continue
 
         X_train = train[feat_cols].copy()
-        y_train = train['actual_margin'].copy()
+        y_train = train['ats_win'].astype(int)
         X_test  = test[feat_cols].copy()
 
         # Drop cols all-null in train
@@ -125,52 +155,61 @@ def backtest_combo(group_names):
         X_train_imp = imp.fit_transform(X_train)
         X_test_imp  = imp.transform(X_test)
 
-        model = XGBRegressor(
+        model = XGBClassifier(
             n_estimators=200, max_depth=4, learning_rate=0.05,
             subsample=0.8, colsample_bytree=0.8,
             min_child_weight=10, reg_lambda=2.0,
+            use_label_encoder=False, eval_metric='logloss',
             random_state=42, n_jobs=-1, verbosity=0,
         )
         model.fit(X_train_imp, y_train)
-        preds = model.predict(X_test_imp)
+        # P(home covers spread)
+        p_home = model.predict_proba(X_test_imp)[:, 1]
+        p_away = 1 - p_home
 
         test = test.copy()
-        test['pred_margin'] = preds
-        # Edge: how much model disagrees with line (home perspective)
-        # Positive edge = model thinks home covers
-        test['edge'] = test['pred_margin'] - (-test['spread'])
+        test['p_home_cover'] = p_home
+        # EV for betting home: P(cover)*1.909 - 1
+        test['ev_home'] = p_home * (1 + PAYOUT) - 1
+        # EV for betting away: P(away cover)*1.909 - 1
+        test['ev_away'] = p_away * (1 + PAYOUT) - 1
+        # Best side and its EV
+        test['best_ev']   = test[['ev_home','ev_away']].max(axis=1)
+        test['bet_home']  = test['ev_home'] >= test['ev_away']
         all_preds.append(test)
 
     if not all_preds:
         return None
 
     result_df = pd.concat(all_preds)
-    bet = result_df[result_df['edge'].abs() >= EDGE_MIN].copy()
+    # Only bet when best EV exceeds threshold
+    bet = result_df[result_df['best_ev'] >= EV_MIN].copy()
     if len(bet) < 100:
         return None
 
-    # Win = model bet the right side
-    # edge > 0 means bet home; win if home covered (ats_win=1)
-    # edge < 0 means bet away; win if home did NOT cover (ats_win=0)
-    bet = bet.copy()
-    bet['bet_won'] = ((bet['edge'] > 0) & (bet['ats_win'] == 1)) |                      ((bet['edge'] < 0) & (bet['ats_win'] == 0))
-    bet['bet_won'] = bet['bet_won'].astype(int)
+    bet['bet_won'] = (
+        (bet['bet_home'] & (bet['ats_win'] == 1)) |
+        (~bet['bet_home'] & (bet['ats_win'] == 0))
+    ).astype(int)
 
     wins  = bet['bet_won'].sum()
     total = len(bet)
     wr    = wins / total
     roi   = (wins * PAYOUT - (total - wins)) / total
+    avg_ev = bet['best_ev'].mean()
     return {
         'combo': '+'.join(group_names),
         'n_bets': total,
         'win_rate': round(wr, 4),
         'roi': round(roi, 4),
+        'avg_ev': round(avg_ev, 4),
         'n_seasons': len(test_seasons),
+        'leaky': any(g in LEAKY_SOURCES for g in group_names),
     }
 
 # ── Run all combinations ─────────────────────────────────────────────────────
 print(f"\nTesting all combinations of {len(OPTIONAL_SOURCES)} optional feature groups...")
-print(f"(always including CONTEXT)\n")
+print(f"(always including CONTEXT; EV threshold = {EV_MIN:.0%})\n")
 
 results = []
 total_combos = sum(len(list(itertools.combinations(OPTIONAL_SOURCES, r)))
@@ -184,9 +223,10 @@ for r in range(1, len(OPTIONAL_SOURCES)+1):
         res = backtest_combo(groups)
         if res:
             results.append(res)
+            flag = '⚠ LEAKY' if res['leaky'] else '✓ CLEAN'
             if res['roi'] > 0:
-                print(f"  ✓ {res['combo']:50s} | {res['n_bets']:5d} bets | "
-                      f"WR={res['win_rate']:.3f} | ROI={res['roi']:+.3f}")
+                print(f"  {flag} {res['combo']:55s} | {res['n_bets']:5d} bets | "
+                      f"WR={res['win_rate']:.3f} | ROI={res['roi']:+.3f} | EV={res['avg_ev']:+.3f}")
         done += 1
         if done % 10 == 0:
             print(f"  ... {done}/{total_combos} combos done", end='\r')
@@ -197,15 +237,24 @@ print(f"\nCompleted {done} combos, {len(results)} with sufficient data")
 res_df = pd.DataFrame(results).sort_values('roi', ascending=False)
 res_df.to_csv(os.path.join(OUT_DIR, 'combo_backtest_results.csv'), index=False)
 
-print("\n" + "="*80)
-print("TOP 15 COMBOS BY OUT-OF-SAMPLE ROI")
-print("="*80)
-print(f"{'Combo':<55} {'Bets':>6} {'WR':>6} {'ROI':>7}")
-print("-"*80)
-for _, r in res_df.head(15).iterrows():
-    print(f"{r['combo']:<55} {r['n_bets']:>6} {r['win_rate']:>6.3f} {r['roi']:>+7.3f}")
+clean_df = res_df[~res_df['leaky']]
+leaky_df = res_df[res_df['leaky']]
 
-best = res_df.iloc[0]
-print(f"\nBest combo: {best['combo']}")
-print(f"  Win rate: {best['win_rate']:.3f} | ROI: {best['roi']:+.4f} | Bets: {best['n_bets']}")
-print(f"\nNext: python scripts/06_train_final_model.py --combo \"{best['combo']}\"")
+print("\n" + "="*90)
+print("TOP 10 CLEAN COMBOS (no look-ahead leakage) — BY OUT-OF-SAMPLE ROI")
+print("="*90)
+print(f"{'Combo':<60} {'Bets':>6} {'WR':>6} {'ROI':>7} {'AvgEV':>7}")
+print("-"*90)
+for _, r in clean_df.head(10).iterrows():
+    print(f"{r['combo']:<60} {r['n_bets']:>6} {r['win_rate']:>6.3f} {r['roi']:>+7.3f} {r['avg_ev']:>+7.3f}")
+
+print("\n" + "="*90)
+print("TOP 5 LEAKY COMBOS (season-final data — for reference only)")
+print("="*90)
+for _, r in leaky_df.head(5).iterrows():
+    print(f"{r['combo']:<60} {r['n_bets']:>6} {r['win_rate']:>6.3f} {r['roi']:>+7.3f}")
+
+best_clean = clean_df.iloc[0] if not clean_df.empty else res_df.iloc[0]
+print(f"\nBest CLEAN combo: {best_clean['combo']}")
+print(f"  Win rate: {best_clean['win_rate']:.3f} | ROI: {best_clean['roi']:+.4f} | AvgEV: {best_clean['avg_ev']:+.4f} | Bets: {best_clean['n_bets']}")
+print(f"\nNext: python scripts/06_train_final_model.py --combo \"{best_clean['combo']}\"")
