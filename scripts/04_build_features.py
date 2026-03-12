@@ -436,14 +436,19 @@ WHERE home_score IS NOT NULL AND away_score IS NOT NULL
 def load_lines(conn):
     try:
         df = pd.read_sql("""
-            SELECT game_id,
+            SELECT game_date, home_team, away_team,
                    AVG(spread) as spread,
                    MIN(spread_open) as spread_open
             FROM game_lines
-            GROUP BY game_id
+            WHERE spread IS NOT NULL
+            GROUP BY game_date, home_team, away_team
         """, conn)
-        print(f"  Lines: {len(df)}")
-        return df.set_index('game_id')
+        df['home_team'] = df['home_team'].apply(norm)
+        df['away_team'] = df['away_team'].apply(norm)
+        df['game_date'] = pd.to_datetime(df['game_date'])
+        df = df.set_index(['game_date','home_team','away_team'])
+        print(f"  Lines: {len(df)} unique games")
+        return df
     except Exception as e:
         print(f"  Lines WARNING: {e}")
         return pd.DataFrame()
@@ -572,9 +577,10 @@ def build_features():
     hca      = build_hca(games)
     rest_map = build_rest(games)
 
-    # Join lines
+    # Merge lines on date+home+away (game_lines uses external IDs, not our games.id)
     if not lines.empty:
-        games = games.join(lines, on='id', how='left')
+        lines_reset = lines.reset_index()
+        games = games.merge(lines_reset, on=['game_date','home_team','away_team'], how='left')
     else:
         games['spread'] = np.nan
         games['spread_open'] = np.nan
