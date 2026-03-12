@@ -1,267 +1,329 @@
 """
 03d_pull_kenpom_archive.py
 ==========================
-Pulls KenPom archive (daily snapshot) ratings for every game date in the DB.
-Stores in kenpom_daily table: one row per (season, snapshot_date, team).
+Pulls two KenPom endpoints for every game date in the DB:
 
-Uses day-before-game snapshot to avoid leakage — same pattern as torvik_daily.
+1. archive  — daily team ratings snapshot (AdjEM, AdjOE, AdjDE, AdjTempo, Luck, SOS)
+              Uses day-before-game date to avoid leakage.
+              Stored in: kenpom_daily
 
-API docs: https://kenpom.com/api
+2. fanmatch — pre-game predictions (predicted scores, win prob, tempo)
+              These are inherently leakage-free (pre-game projections).
+              Stored in: kenpom_fanmatch
+
+Base URL:  https://kenpom.com/api.php
+Auth:      Authorization: Bearer <key>
+Docs:      https://kenpom.com/api-documentation.php
+
 Run: python scripts/03d_pull_kenpom_archive.py
-Expected runtime: ~20-40 min depending on number of unique game dates.
 """
-import sqlite3, requests, time, os, json
+import sqlite3, requests, time, os
 from datetime import datetime, timedelta
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB   = os.path.join(ROOT, 'data', 'basketball.db')
 
 API_KEY  = 'b59dbfcaa5224d02cea409c73299040637a4d3445da5def3d1f320e313da1571'
-BASE_URL = 'https://kenpom.com/api'
+BASE_URL = 'https://kenpom.com/api.php'
 HEADERS  = {'Authorization': f'Bearer {API_KEY}'}
+
+# ── DB setup ─────────────────────────────────────────────────────────────────
 
 def db():
     conn = sqlite3.connect(DB)
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
-def ensure_table(conn):
+def ensure_tables(conn):
     conn.execute("""
         CREATE TABLE IF NOT EXISTS kenpom_daily (
             season        INTEGER,
-            snapshot_date TEXT,   -- YYYYMMDD
+            snapshot_date TEXT,    -- YYYYMMDD
             team          TEXT,
             adj_em        REAL,
-            adj_o         REAL,
-            adj_d         REAL,
-            adj_t         REAL,
+            adj_oe        REAL,
+            adj_de        REAL,
+            adj_tempo     REAL,
             luck          REAL,
-            sos_adj_em    REAL,
-            opp_o         REAL,
-            opp_d         REAL,
-            ncon_sos      REAL,
-            rank          INTEGER,
+            sos           REAL,
+            sos_o         REAL,
+            sos_d         REAL,
+            ncsос         REAL,
+            rank_adj_em   INTEGER,
+            pythag        REAL,
             PRIMARY KEY (season, snapshot_date, team)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS kenpom_fanmatch (
+            season        INTEGER,
+            game_date     TEXT,    -- YYYY-MM-DD
+            game_id       INTEGER,
+            home_team     TEXT,
+            away_team     TEXT,
+            home_rank     INTEGER,
+            away_rank     INTEGER,
+            home_pred     REAL,
+            away_pred     REAL,
+            home_wp       REAL,
+            pred_tempo    REAL,
+            thrill_score  REAL,
+            PRIMARY KEY (season, game_date, game_id)
         )
     """)
     conn.commit()
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
 def season_for_date(d):
     return d.year + 1 if d.month >= 11 else d.year
 
-def fetch_snapshot(snap_date_str, season):
-    """
-    Fetch KenPom archive ratings for a specific date.
-    snap_date_str: YYYYMMDD
-    Returns list of row dicts, or None on failure.
-    """
-    # Convert YYYYMMDD to YYYY-MM-DD for API
-    d = datetime.strptime(snap_date_str, '%Y%m%d')
-    date_param = d.strftime('%Y-%m-%d')
+def fv(d, *keys):
+    for k in keys:
+        v = d.get(k)
+        if v is not None:
+            try: return float(v)
+            except: pass
+    return None
 
-    url = f"{BASE_URL}/archive/ratings"
-    params = {'date': date_param}
+def iv(d, *keys):
+    for k in keys:
+        v = d.get(k)
+        if v is not None:
+            try: return int(v)
+            except: pass
+    return None
 
-    try:
-        r = requests.get(url, headers=HEADERS, params=params, timeout=20)
-        if r.status_code == 404:
-            return None, 'not_found'
-        if r.status_code == 401:
-            return None, 'auth_error'
-        if r.status_code == 429:
-            return None, 'rate_limit'
-        if r.status_code != 200:
+def api_get(endpoint, params, retries=2):
+    p = {'endpoint': endpoint, **params}
+    for attempt in range(retries + 1):
+        try:
+            r = requests.get(BASE_URL, headers=HEADERS, params=p, timeout=20)
+            if r.status_code == 200:
+                return r.json(), 'ok'
+            if r.status_code == 404:
+                return None, 'not_found'
+            if r.status_code == 401:
+                return None, 'auth_error'
+            if r.status_code == 429:
+                time.sleep(60)
+                continue
             return None, f'http_{r.status_code}'
-
-        data = r.json()
-
-        # Probe response shape on first call
-        if not data:
-            return None, 'empty'
-
-        return data, 'ok'
-
-    except requests.exceptions.Timeout:
-        return None, 'timeout'
-    except Exception as e:
-        return None, f'error:{e}'
-
-def parse_and_insert(data, snap_date_str, season, cur):
-    """
-    Parse API response and insert rows.
-    We'll probe the shape on first real call — KenPom API returns
-    either a list of team dicts or a dict with a 'ratings' key.
-    """
-    rows = []
-
-    # Handle both list and wrapped-list response shapes
-    if isinstance(data, dict):
-        # Try common wrapper keys
-        for key in ('ratings', 'data', 'teams', 'results'):
-            if key in data and isinstance(data[key], list):
-                data = data[key]
-                break
-        else:
-            # Flat dict with team names as keys?
-            if all(isinstance(v, dict) for v in data.values()):
-                data = [{'team': k, **v} for k, v in data.items()]
+        except requests.exceptions.Timeout:
+            if attempt < retries:
+                time.sleep(5)
             else:
-                return 0, f'unexpected_shape: {list(data.keys())[:5]}'
+                return None, 'timeout'
+        except Exception as e:
+            return None, f'error:{e}'
+    return None, 'max_retries'
 
-    for item in data:
-        if not isinstance(item, dict):
-            continue
+# ── Archive (daily ratings) ───────────────────────────────────────────────────
 
-        # Team name — try multiple field names
-        team = (item.get('team_name') or item.get('team') or
-                item.get('TeamName') or item.get('name') or '')
+def fetch_archive(snap_date_str, season, cur):
+    """Fetch archive ratings for YYYYMMDD date, insert into kenpom_daily."""
+    date_param = f"{snap_date_str[:4]}-{snap_date_str[4:6]}-{snap_date_str[6:8]}"
+    data, status = api_get('archive', {'d': date_param})
+    if status != 'ok' or not data:
+        return 0, status
+
+    rows = []
+    for item in (data if isinstance(data, list) else []):
+        team = item.get('TeamName', '').strip()
         if not team:
             continue
-
-        def fv(keys):
-            """Try multiple key names, return float or None."""
-            for k in (keys if isinstance(keys, list) else [keys]):
-                v = item.get(k)
-                if v is not None:
-                    try: return float(v)
-                    except: pass
-            return None
-
-        adj_em = fv(['adj_em', 'AdjEM', 'adj_efficiency_margin', 'em'])
-        adj_o  = fv(['adj_o',  'AdjO',  'adj_offense',  'adjoe', 'adj_off'])
-        adj_d  = fv(['adj_d',  'AdjD',  'adj_defense',  'adjde', 'adj_def'])
-        adj_t  = fv(['adj_t',  'AdjT',  'adj_tempo',    'adjte', 'tempo'])
-        luck   = fv(['luck',   'Luck'])
-        sos    = fv(['sos_adj_em', 'sos', 'SOS', 'strength_of_schedule',
-                     'sos_em', 'adj_em_sos'])
-        opp_o  = fv(['opp_o', 'OppO', 'opp_adj_o', 'opp_offense'])
-        opp_d  = fv(['opp_d', 'OppD', 'opp_adj_d', 'opp_defense'])
-        ncon   = fv(['ncon_sos', 'ncon', 'non_conf_sos'])
-        rank   = item.get('rank') or item.get('Rank') or item.get('rk')
-        try: rank = int(rank) if rank is not None else None
-        except: rank = None
-
-        rows.append((season, snap_date_str, str(team).strip(),
-                     adj_em, adj_o, adj_d, adj_t, luck,
-                     sos, opp_o, opp_d, ncon, rank))
+        rows.append((
+            season, snap_date_str, team,
+            fv(item, 'AdjEM'),
+            fv(item, 'AdjOE'),
+            fv(item, 'AdjDE'),
+            fv(item, 'AdjTempo'),
+            fv(item, 'Luck'),
+            fv(item, 'SOS'),
+            fv(item, 'SOSO'),
+            fv(item, 'SOSD'),
+            fv(item, 'NCSОС', 'NCSОС'),
+            iv(item, 'RankAdjEM'),
+            fv(item, 'Pythag'),
+        ))
 
     if rows:
         cur.executemany("""
             INSERT OR IGNORE INTO kenpom_daily
-            (season, snapshot_date, team, adj_em, adj_o, adj_d, adj_t,
-             luck, sos_adj_em, opp_o, opp_d, ncon_sos, rank)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            (season, snapshot_date, team, adj_em, adj_oe, adj_de, adj_tempo,
+             luck, sos, sos_o, sos_d, ncsос, rank_adj_em, pythag)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, rows)
         cur.connection.commit()
-
     return len(rows), 'ok'
 
-def probe_api():
-    """Fetch one date to confirm API shape before bulk run."""
-    print("Probing API with 2024-01-15...")
-    data, status = fetch_snapshot('20240115', 2024)
-    if status != 'ok':
-        print(f"  ERROR: {status}")
-        return False
-    print(f"  Status: ok, response type: {type(data)}")
-    if isinstance(data, list):
-        print(f"  List length: {len(data)}")
-        print(f"  First item keys: {list(data[0].keys()) if data else '(empty)'}")
-        print(f"  First item sample: {data[0]}")
-    elif isinstance(data, dict):
-        print(f"  Dict keys: {list(data.keys())[:10]}")
-    return True
+# ── Fanmatch (pre-game predictions) ──────────────────────────────────────────
+
+def fetch_fanmatch(game_date_str, season, cur):
+    """Fetch fanmatch predictions for a game date (YYYY-MM-DD)."""
+    data, status = api_get('fanmatch', {'d': game_date_str})
+    if status != 'ok' or not data:
+        return 0, status
+
+    rows = []
+    for item in (data if isinstance(data, list) else []):
+        gid = iv(item, 'GameID')
+        home = item.get('Home', '').strip()
+        away = item.get('Visitors', '').strip()
+        if not home or not away:
+            continue
+        rows.append((
+            season, game_date_str, gid,
+            home, away,
+            iv(item, 'HomeRank'),
+            iv(item, 'VisitorRank'),
+            fv(item, 'HomePred'),
+            fv(item, 'VisitorPred'),
+            fv(item, 'HomeWP'),
+            fv(item, 'PredTempo'),
+            fv(item, 'ThrillScore'),
+        ))
+
+    if rows:
+        cur.executemany("""
+            INSERT OR IGNORE INTO kenpom_fanmatch
+            (season, game_date, game_id, home_team, away_team,
+             home_rank, away_rank, home_pred, away_pred,
+             home_wp, pred_tempo, thrill_score)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        """, rows)
+        cur.connection.commit()
+    return len(rows), 'ok'
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     conn = db()
     cur  = conn.cursor()
-    ensure_table(conn)
+    ensure_tables(conn)
 
-    # Probe API shape first
-    if not probe_api():
-        print("API probe failed — check key and endpoint. Aborting.")
+    # ── Probe first ──────────────────────────────────────────────────────────
+    print("Probing archive endpoint (2024-01-15)...")
+    data, status = api_get('archive', {'d': '2024-01-15'})
+    if status != 'ok':
+        print(f"  FAILED: {status}")
+        if status == 'auth_error':
+            print("  Check API key.")
         return
+    sample = data[0] if isinstance(data, list) and data else {}
+    print(f"  OK — {len(data) if isinstance(data, list) else '?'} teams")
+    print(f"  Sample keys: {list(sample.keys())[:12]}")
+    print(f"  Sample TeamName: {sample.get('TeamName')}  AdjEM: {sample.get('AdjEM')}")
+
+    print("\nProbing fanmatch endpoint (2024-01-15)...")
+    data2, status2 = api_get('fanmatch', {'d': '2024-01-15'})
+    if status2 == 'ok' and data2:
+        s2 = data2[0] if isinstance(data2, list) else {}
+        print(f"  OK — {len(data2)} games")
+        print(f"  Sample: {s2.get('Home')} vs {s2.get('Visitors')}  HomeWP={s2.get('HomeWP')}")
+    else:
+        print(f"  Status: {status2}")
 
     print()
 
-    # All unique game dates + seasons
+    # ── All game dates ────────────────────────────────────────────────────────
     game_rows = cur.execute("""
         SELECT DISTINCT game_date, season FROM games
         WHERE home_score IS NOT NULL ORDER BY game_date
     """).fetchall()
 
-    # Already-fetched snapshot dates
-    existing = set(
-        r[0] for r in cur.execute(
-            "SELECT DISTINCT snapshot_date FROM kenpom_daily"
-        )
-    )
-    print(f"Existing kenpom_daily snapshots: {len(existing)}")
+    existing_archive  = set(r[0] for r in cur.execute(
+        "SELECT DISTINCT snapshot_date FROM kenpom_daily"))
+    existing_fanmatch = set(r[0] for r in cur.execute(
+        "SELECT DISTINCT game_date FROM kenpom_fanmatch"))
 
-    # Build fetch list: day before each game date
-    seen = set()
-    to_fetch = []
+    # Build fetch lists
+    seen_snaps = set()
+    archive_todo  = []
+    fanmatch_todo = []
+
     for gd_str, season in game_rows:
-        gd   = datetime.strptime(gd_str[:10], '%Y-%m-%d')
+        gd = datetime.strptime(gd_str[:10], '%Y-%m-%d')
+        s  = season_for_date(gd.date())
+
+        # Archive: day before game
         snap = (gd - timedelta(days=1))
         snap_str = snap.strftime('%Y%m%d')
-        s = season_for_date(snap.date())
-        if snap_str not in existing and snap_str not in seen:
-            seen.add(snap_str)
-            to_fetch.append((snap_str, s))
+        if snap_str not in existing_archive and snap_str not in seen_snaps:
+            seen_snaps.add(snap_str)
+            archive_todo.append((snap_str, s))
 
-    print(f"Dates to fetch: {len(to_fetch)}")
-    print(f"Estimated time: {len(to_fetch)*1.2/60:.0f}-{len(to_fetch)*2/60:.0f} min\n")
+        # Fanmatch: game date itself
+        gd_fmt = gd.strftime('%Y-%m-%d')
+        if gd_fmt not in existing_fanmatch:
+            fanmatch_todo.append((gd_fmt, season))
 
-    total_rows = errors = not_found = rate_limited = 0
+    # Dedup fanmatch
+    seen_fm = set()
+    fanmatch_todo_dedup = []
+    for gd_fmt, season in fanmatch_todo:
+        if gd_fmt not in seen_fm:
+            seen_fm.add(gd_fmt)
+            fanmatch_todo_dedup.append((gd_fmt, season))
 
-    for i, (snap_str, season) in enumerate(to_fetch):
-        data, status = fetch_snapshot(snap_str, season)
+    print(f"Archive dates to fetch:  {len(archive_todo)}")
+    print(f"Fanmatch dates to fetch: {len(fanmatch_todo_dedup)}")
+    total_dates = len(archive_todo) + len(fanmatch_todo_dedup)
+    print(f"Total requests: {total_dates}  (~{total_dates*1.3/60:.0f}-{total_dates*1.8/60:.0f} min)\n")
 
-        if status == 'ok':
-            n, parse_status = parse_and_insert(data, snap_str, season, cur)
-            total_rows += n
-            if (i+1) % 25 == 0 or i < 3:
-                print(f"  [{i+1:>4}/{len(to_fetch)}] {snap_str} (s{season}): "
-                      f"{n} teams | total: {total_rows:,}")
-            if 'unexpected_shape' in parse_status:
-                print(f"  [{i+1}] SHAPE WARNING: {parse_status}")
-                print(f"  Raw data sample: {str(data)[:300]}")
-                break  # Stop and fix parser before continuing
-        elif status == 'not_found':
-            not_found += 1
-            if not_found <= 3:
-                print(f"  [{i+1:>4}] {snap_str}: 404 (pre-season date?)")
-        elif status == 'rate_limit':
-            rate_limited += 1
-            print(f"  [{i+1:>4}] {snap_str}: rate limited — sleeping 60s")
-            time.sleep(60)
-            # Retry once
-            data, status = fetch_snapshot(snap_str, season)
+    # ── Fetch archive ─────────────────────────────────────────────────────────
+    if archive_todo:
+        print("── Fetching archive snapshots ──")
+        total_rows = errors = not_found = 0
+        for i, (snap_str, season) in enumerate(archive_todo):
+            n, status = fetch_archive(snap_str, season, cur)
             if status == 'ok':
-                n, _ = parse_and_insert(data, snap_str, season, cur)
                 total_rows += n
-        elif status == 'auth_error':
-            print("AUTH ERROR — check API key. Aborting.")
-            break
-        else:
-            errors += 1
-            if errors <= 5:
-                print(f"  [{i+1:>4}] {snap_str}: {status}")
+                if (i+1) % 50 == 0 or i < 3:
+                    print(f"  [{i+1:>4}/{len(archive_todo)}] {snap_str}: {n} teams | total: {total_rows:,}")
+            elif status == 'not_found':
+                not_found += 1
+                if not_found <= 3:
+                    print(f"  [{i+1:>4}] {snap_str}: 404 (pre-season?)")
+            elif status == 'auth_error':
+                print("AUTH ERROR — aborting."); break
+            else:
+                errors += 1
+                if errors <= 5:
+                    print(f"  [{i+1:>4}] {snap_str}: {status}")
+            time.sleep(1.3)
 
-        time.sleep(1.2)  # Respectful rate limit
+        print(f"  Archive done: {total_rows:,} rows, {not_found} not_found, {errors} errors\n")
 
-    print(f"\n{'='*50}")
-    print(f"Done.")
-    print(f"  Fetched:    {len(to_fetch)} dates")
-    print(f"  Rows added: {total_rows:,}")
-    print(f"  Not found:  {not_found}")
-    print(f"  Errors:     {errors}")
+    # ── Fetch fanmatch ────────────────────────────────────────────────────────
+    if fanmatch_todo_dedup:
+        print("── Fetching fanmatch predictions ──")
+        total_fm = errors_fm = not_found_fm = 0
+        for i, (gd_fmt, season) in enumerate(fanmatch_todo_dedup):
+            n, status = fetch_fanmatch(gd_fmt, season, cur)
+            if status == 'ok':
+                total_fm += n
+                if (i+1) % 50 == 0 or i < 3:
+                    print(f"  [{i+1:>4}/{len(fanmatch_todo_dedup)}] {gd_fmt}: {n} games | total: {total_fm:,}")
+            elif status == 'not_found':
+                not_found_fm += 1
+            elif status == 'auth_error':
+                print("AUTH ERROR — aborting."); break
+            else:
+                errors_fm += 1
+                if errors_fm <= 5:
+                    print(f"  [{i+1:>4}] {gd_fmt}: {status}")
+            time.sleep(1.3)
 
-    total = cur.execute("SELECT COUNT(*) FROM kenpom_daily").fetchone()[0]
-    udates = cur.execute("SELECT COUNT(DISTINCT snapshot_date) FROM kenpom_daily").fetchone()[0]
-    print(f"\n  kenpom_daily: {total:,} rows, {udates} snapshot dates")
-    print(f"\nNext: python scripts/04_build_features.py")
+        print(f"  Fanmatch done: {total_fm:,} predictions, {not_found_fm} not_found, {errors_fm} errors\n")
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    print("="*50)
+    kd = cur.execute("SELECT COUNT(*), COUNT(DISTINCT snapshot_date) FROM kenpom_daily").fetchone()
+    kf = cur.execute("SELECT COUNT(*), COUNT(DISTINCT game_date) FROM kenpom_fanmatch").fetchone()
+    print(f"kenpom_daily:    {kd[0]:,} rows, {kd[1]} snapshot dates")
+    print(f"kenpom_fanmatch: {kf[0]:,} rows, {kf[1]} game dates")
+    print("\nNext: python scripts/04_build_features.py")
     conn.close()
 
 if __name__ == '__main__':
