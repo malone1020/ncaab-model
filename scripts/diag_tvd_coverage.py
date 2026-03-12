@@ -1,4 +1,4 @@
-"""Check TVD coverage across all games — both teams must hit for a game to count."""
+"""Full TVD coverage check — per season hit rate."""
 import sqlite3, os, sys, pandas as pd
 sys.path.insert(0, 'scripts')
 DB = os.path.join(os.getcwd(), 'data', 'basketball.db')
@@ -15,56 +15,45 @@ lines = fb.load_lines(conn)
 if not lines.empty:
     games = games.merge(lines, on=['game_date','home_team','away_team'], how='left')
 
-total = both_hit = home_hit = away_hit = no_hit = 0
-key_missing = date_too_early = 0
+# Per-season: count games where BOTH teams get a TVD hit
+season_stats = {}
+key_miss_examples = {}
+date_miss_examples = {}
 
 for _, g in games.iterrows():
     s  = int(g['season'])
     gd = pd.Timestamp(g['game_date'])
     gdate_int = int(gd.strftime('%Y%m%d'))
-    total += 1
+    if s not in season_stats:
+        season_stats[s] = {'total':0,'both':0,'key_miss':0,'date_miss':0}
+    season_stats[s]['total'] += 1
 
-    h_hit = a_hit = False
-    for team, flag in [(g['home_team'], 'h'), (g['away_team'], 'a')]:
+    h_ok = a_ok = False
+    for team in [g['home_team'], g['away_team']]:
         snaps = tv_d.get((s, team))
         if snaps is None:
-            key_missing += 1
+            season_stats[s]['key_miss'] += 1
+            if s not in key_miss_examples:
+                key_miss_examples[s] = team
         elif snaps[0][0] >= gdate_int:
-            date_too_early += 1
+            season_stats[s]['date_miss'] += 1
+            if s not in date_miss_examples:
+                date_miss_examples[s] = f"team={team} game={gdate_int} earliest_snap={snaps[0][0]}"
         else:
-            if flag == 'h': h_hit = True
-            else:           a_hit = True
+            if team == g['home_team']: h_ok = True
+            else: a_ok = True
+    if h_ok and a_ok:
+        season_stats[s]['both'] += 1
 
-    if h_hit and a_hit: both_hit += 1
-    elif h_hit or a_hit: (home_hit if h_hit else away_hit).__class__  # dummy
-    else: no_hit += 1
-    if h_hit: home_hit += 1
-    if a_hit: away_hit += 1
-
-print(f"Total games:         {total:,}")
-print(f"Both teams hit:      {both_hit:,}  ({100*both_hit/total:.1f}%)")
-print(f"Home team hit:       {home_hit:,}  ({100*home_hit/total:.1f}%)")
-print(f"Away team hit:       {away_hit:,}  ({100*away_hit/total:.1f}%)")
-print(f"Key missing (team-sides): {key_missing:,}")
-print(f"Key exists but game before first snap: {date_too_early:,}")
-
-# Per-season both-hit rate
-print("\nPer-season both-hit rate:")
-season_counts = {}
-for _, g in games.iterrows():
-    s  = int(g['season'])
-    gd = pd.Timestamp(g['game_date'])
-    gdate_int = int(gd.strftime('%Y%m%d'))
-    h = tv_d.get((s, g['home_team']))
-    a = tv_d.get((s, g['away_team']))
-    h_ok = h is not None and h[0][0] < gdate_int
-    a_ok = a is not None and a[0][0] < gdate_int
-    if s not in season_counts: season_counts[s] = [0,0]
-    season_counts[s][1] += 1
-    if h_ok and a_ok: season_counts[s][0] += 1
-
-for s in sorted(season_counts):
-    hit, tot = season_counts[s]
-    print(f"  {s}: {hit:,}/{tot:,}  ({100*hit/tot:.0f}%)")
+print(f"{'Season':>8} {'Total':>7} {'Both':>7} {'%':>6} {'KeyMiss':>8} {'DateMiss':>9}")
+print("-"*55)
+for s in sorted(season_stats):
+    d = season_stats[s]
+    pct = 100*d['both']/d['total'] if d['total'] else 0
+    print(f"  {s}   {d['total']:>6} {d['both']:>7} {pct:>5.0f}%  {d['key_miss']:>7}  {d['date_miss']:>8}")
+    if s in key_miss_examples:
+        print(f"           key_miss ex: '{key_miss_examples[s]}'")
+    if s in date_miss_examples:
+        print(f"           date_miss ex: {date_miss_examples[s]}")
 
 conn.close()
