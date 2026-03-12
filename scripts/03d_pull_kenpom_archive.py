@@ -35,6 +35,7 @@ def db():
     return conn
 
 def ensure_tables(conn):
+    conn.execute("DROP TABLE IF EXISTS kenpom_daily")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS kenpom_daily (
             season        INTEGER,
