@@ -336,14 +336,18 @@ def load_torvik_season(conn):
 def load_torvik_daily(conn):
     if not tbl_exists(conn, 'torvik_daily'): return pd.DataFrame()
     try:
-        # Parse snapshot_date stored as YYYYMMDD string -> proper datetime
+        # Parse snapshot_date — handles both YYYYMMDD (backfill) and YYYY-MM-DD (old monthly)
         df = pd.read_sql(
             "SELECT season, team, adj_o, adj_d, barthag, adj_em, "
             "efg_o, efg_d, tov_o, tov_d, orb, drb, ftr_o, ftr_d, "
-            "SUBSTR(snapshot_date,1,4)||'-'||SUBSTR(snapshot_date,5,2)||'-'||SUBSTR(snapshot_date,7,2) AS snapshot_date "
-            "FROM torvik_daily", conn)
+            "snapshot_date FROM torvik_daily", conn)
         df['team'] = df['team'].apply(norm)
-        df['snapshot_date'] = pd.to_datetime(df['snapshot_date'])
+        def parse_snap(s):
+            s = str(s).strip()
+            if len(s) == 8 and '-' not in s:
+                return pd.Timestamp(f"{s[:4]}-{s[4:6]}-{s[6:8]}")
+            return pd.Timestamp(s)
+        df['snapshot_date'] = df['snapshot_date'].apply(parse_snap)
         df['season'] = df['season'].astype(int)
         df = df.sort_values('snapshot_date').reset_index(drop=True)
         print(f"  Torvik daily: {len(df)} snapshots")
@@ -438,7 +442,9 @@ def load_lines(conn):
         df = pd.read_sql("""
             SELECT game_date, home_team, away_team,
                    AVG(spread) as spread,
-                   MIN(spread_open) as spread_open
+                   MIN(spread_open) as spread_open,
+                   AVG(over_under) as over_under,
+                   MIN(over_under_open) as over_under_open
             FROM game_lines
             WHERE spread IS NOT NULL
             GROUP BY game_date, home_team, away_team
@@ -598,11 +604,17 @@ def build_features():
 
         spread = g.get('spread') if pd.notna(g.get('spread')) else None
         spread_open = g.get('spread_open') if pd.notna(g.get('spread_open')) else None
+        over_under = g.get('over_under') if pd.notna(g.get('over_under')) else None
+        over_under_open = g.get('over_under_open') if pd.notna(g.get('over_under_open')) else None
+        actual_total = (g.get('home_score', 0) or 0) + (g.get('away_score', 0) or 0)
+        actual_total = actual_total if actual_total > 0 else None
 
         r = {
             'game_id': g['id'], 'season': s, 'game_date': str(gd.date()),
             'home_team': home, 'away_team': away,
             'actual_margin': am, 'spread': spread, 'spread_open': spread_open,
+            'over_under': over_under, 'over_under_open': over_under_open,
+            'actual_total': actual_total,
             'neutral_site': int(bool(g.get('neutral_site',0))),
             'conf_game': int(bool(g.get('conf_game',0))),
         }
@@ -663,7 +675,7 @@ def build_features():
 
         # ── Haslametrics (prior season, from haslametrics_full) ──
         for side, team in [('h',home),('a',away)]:
-            ha = hasla.get((s-1, team), {})
+            ha = hasla.get((s, team), {})  # same season — end-of-season ratings, no leakage
             # HA_CORE
             r[f'{side}_ha_o_eff']  = ha.get('o_eff')
             r[f'{side}_ha_d_eff']  = ha.get('d_eff')
@@ -756,6 +768,7 @@ def build_features():
     print(f"\n✅ Saved {len(df):,} rows → game_features_v2")
     print(f"   Columns: {len(df.columns)}")
     print(f"   With spread: {df['spread'].notna().sum():,}")
+    print(f"   With over/under: {df['over_under'].notna().sum():,}")
     print(f"   With torvik daily: {df['tvd_em_gap'].notna().sum():,}")
     print(f"   With haslametrics: {df['ha_eff_gap'].notna().sum():,}")
     print(f"   With torvik pred:  {df['torvik_pred'].notna().sum():,}")
