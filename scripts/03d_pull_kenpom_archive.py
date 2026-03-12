@@ -41,8 +41,8 @@ def ensure_tables(conn):
             snapshot_date TEXT,    -- YYYYMMDD
             team          TEXT,
             adj_em        REAL,
-            adj_oe        REAL,
-            adj_de        REAL,
+            adj_o         REAL,
+            adj_d         REAL,
             adj_tempo     REAL,
             luck          REAL,
             sos           REAL,
@@ -150,7 +150,7 @@ def fetch_archive(snap_date_str, season, cur):
     if rows:
         cur.executemany("""
             INSERT OR IGNORE INTO kenpom_daily
-            (season, snapshot_date, team, adj_em, adj_oe, adj_de, adj_tempo,
+            (season, snapshot_date, team, adj_em, adj_o, adj_d, adj_tempo,
              luck, sos, sos_o, sos_d, ncsос, rank_adj_em, pythag)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, rows)
@@ -169,7 +169,7 @@ def fetch_fanmatch(game_date_str, season, cur):
     for item in (data if isinstance(data, list) else []):
         gid = iv(item, 'GameID')
         home = item.get('Home', '').strip()
-        away = item.get('Visitors', '').strip()
+        away = (item.get('Visitor') or item.get('Visitors') or item.get('Away') or '').strip()
         if not home or not away:
             continue
         rows.append((
@@ -283,8 +283,8 @@ def main():
                     print(f"  [{i+1:>4}/{len(archive_todo)}] {snap_str}: {n} teams | total: {total_rows:,}")
             elif status == 'not_found':
                 not_found += 1
-                if not_found <= 3:
-                    print(f"  [{i+1:>4}] {snap_str}: 404 (pre-season?)")
+                if not_found <= 5:
+                    print(f"  [{i+1:>4}] {snap_str}: 404 (pre-season or unavailable)")
             elif status == 'auth_error':
                 print("AUTH ERROR — aborting."); break
             else:
