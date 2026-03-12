@@ -402,6 +402,8 @@ def load_torvik_daily(conn):
         df = pd.read_sql(
             "SELECT season, team, adj_o, adj_d, barthag, adj_em, "
             "efg_o, efg_d, tov_o, tov_d, orb, drb, ftr_o, ftr_d, "
+            "two_p_o, two_p_d, three_p_o, three_p_d, "
+            "blk_pct, ast_pct, three_p_rate, wins, games, "
             "snapshot_date FROM torvik_daily", conn)
         df['team'] = df['team'].apply(norm)
         df['season'] = df['season'].astype(int)
@@ -411,7 +413,9 @@ def load_torvik_daily(conn):
         df['snap_int'] = df['snapshot_date'].apply(snap_to_int)
 
         cols = ['adj_o','adj_d','barthag','adj_em','efg_o','efg_d',
-                'tov_o','tov_d','orb','drb','ftr_o','ftr_d']
+                'tov_o','tov_d','orb','drb','ftr_o','ftr_d',
+                'two_p_o','two_p_d','three_p_o','three_p_d',
+                'blk_pct','ast_pct','three_p_rate','wins','games']
         index = {}
         for (season, team), grp in df.groupby(['season','team']):
             grp_s = grp.sort_values('snap_int')
@@ -679,7 +683,7 @@ def build_features():
         s    = int(g['season'])
         home = g['home_team']
         away = g['away_team']
-        gd   = g['game_date']
+        gd   = pd.Timestamp(g['game_date'])  # re-cast in case merge changed dtype
         am   = g['actual_margin']
         if pd.isna(am): continue
 
@@ -729,17 +733,22 @@ def build_features():
 
         # ── Torvik daily snapshot (as-of game date) ──
         tvd_keys = ['adj_o','adj_d','barthag','adj_em',
-                    'efg_o','efg_d','tov_o','tov_d','orb','drb','ftr_o','ftr_d']
+                    'efg_o','efg_d','tov_o','tov_d','orb','drb','ftr_o','ftr_d',
+                    'two_p_o','two_p_d','three_p_o','three_p_d',
+                    'blk_pct','ast_pct','three_p_rate','wins','games']
         for side, team in [('h',home),('a',away)]:
             snap = torvik_as_of(tv_d, team, gd, s)
             for k in tvd_keys:
                 val = snap.get(k) if snap is not None else None
                 r[f'{side}_tvd_{k}'] = float(val) if val is not None else None
+        r['tvd_bar_gap']  = gap(r.get('h_tvd_barthag'), r.get('a_tvd_barthag'))
         r['tvd_em_gap']   = gap(r.get('h_tvd_adj_em'),  r.get('a_tvd_adj_em'))
         r['tvd_efg_gap']  = gap(r.get('h_tvd_efg_o'),   r.get('a_tvd_efg_o'))
-        r['tvd_bar_gap']  = gap(r.get('h_tvd_barthag'), r.get('a_tvd_barthag'))
-        r['has_tvd_home'] = int(r.get('h_tvd_adj_em') is not None)
-        r['has_tvd_away'] = int(r.get('a_tvd_adj_em') is not None)
+        r['tvd_3p_gap']   = gap(r.get('h_tvd_three_p_o'), r.get('a_tvd_three_p_o'))
+        r['tvd_2p_gap']   = gap(r.get('h_tvd_two_p_o'),   r.get('a_tvd_two_p_o'))
+        # Use barthag (100% populated) as primary TVD presence flag
+        r['has_tvd_home'] = int(r.get('h_tvd_barthag') is not None)
+        r['has_tvd_away'] = int(r.get('a_tvd_barthag') is not None)
 
         # ── Torvik game predictions ──
         if not tv_p.empty:
@@ -850,7 +859,7 @@ def build_features():
     print(f"   Columns: {len(df.columns)}")
     print(f"   With spread: {df['spread'].notna().sum():,}")
     print(f"   With over/under: {df['over_under'].notna().sum():,}")
-    print(f"   With torvik daily: {df['tvd_em_gap'].notna().sum():,}")
+    print(f"   With torvik daily: {df['tvd_bar_gap'].notna().sum():,}")
     print(f"   With haslametrics: {df['ha_eff_gap'].notna().sum():,}")
     print(f"   With torvik pred:  {df['torvik_pred'].notna().sum():,}")
     return df
