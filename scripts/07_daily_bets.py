@@ -170,13 +170,70 @@ def parse_lines(odds_data, target_date):
     return games
 
 
-def build_features(home_raw, away_raw, spread, target_date, conn, feature_cols, norm_fn):
+
+def fetch_torvik_schedule(target_date):
+    """
+    Fetch today's schedule from Torvik to get conf_game and neutral_site flags.
+    Returns dict keyed by frozenset of normalized team names:
+      {frozenset({'Arizona','Iowa St.'}): {'conf_game': 1, 'neutral': 0}, ...}
+    """
+    url = f"https://barttorvik.com/schedule.php?date={target_date.strftime('%Y%m%d')}"
+    try:
+        r = requests.get(url, timeout=10)
+        if r.status_code != 200:
+            return {}
+        from html.parser import HTMLParser
+        class ScheduleParser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.games = {}
+                self._in_td = False
+                self._cells = []
+                self._row = []
+            def handle_starttag(self, tag, attrs):
+                if tag == 'tr': self._row = []
+                if tag == 'td': self._in_td = True; self._cells = []
+            def handle_endtag(self, tag):
+                if tag == 'td':
+                    self._in_td = False
+                    self._row.append(''.join(self._cells).strip())
+                if tag == 'tr' and len(self._row) >= 3:
+                    # Row format: Time | Matchup (team1 vs team2) | conf | ...
+                    matchup_cell = self._row[1] if len(self._row) > 1 else ''
+                    conf_cell    = self._row[2] if len(self._row) > 2 else ''
+                    if ' vs ' in matchup_cell:
+                        parts = matchup_cell.split(' vs ')
+                        # Strip rank numbers from team names
+                        import re
+                        t1 = re.sub(r'^\d+\s+', '', parts[0]).strip()
+                        t2 = re.sub(r'^\d+\s+', '', parts[1]).strip()
+                        is_conf = 1 if conf_cell and conf_cell not in ('', 'Non') and '-' in conf_cell else 0
+                        is_neutral = 1 if '-T' in conf_cell or '-N' in conf_cell else 0
+                        key = frozenset([t1, t2])
+                        self.games[key] = {'conf_game': is_conf, 'neutral_site': is_neutral}
+            def handle_data(self, data):
+                if self._in_td: self._cells.append(data)
+
+        parser = ScheduleParser()
+        parser.feed(r.text)
+        return parser.games
+    except Exception as e:
+        print(f"  Warning: could not fetch Torvik schedule: {e}")
+        return {}
+
+
+def build_features(home_raw, away_raw, spread, target_date, conn, feature_cols, norm_fn, schedule_info=None):
     home = norm_fn(home_raw)
     away = norm_fn(away_raw)
     gd_str = str(target_date)
 
     row = {c: None for c in feature_cols}
-    row.update({'neutral_site': 0, 'conf_game': 0, 'spread': spread,
+    # Look up conf_game and neutral_site from Torvik schedule
+    sched_key  = frozenset([home, away])
+    sched_data = (schedule_info or {}).get(sched_key, {})
+    conf_game_val    = sched_data.get('conf_game', 0)
+    neutral_site_val = sched_data.get('neutral_site', 0)
+    row.update({'neutral_site': neutral_site_val, 'conf_game': conf_game_val, 'spread': spread,
                 'hca_adj': 3.2, 'rest_diff': 0, 'home_rest': 4, 'away_rest': 4,
                 'home_b2b': 0, 'away_b2b': 0})
 
@@ -352,6 +409,11 @@ if __name__ == '__main__':
         print("No games found. Use --demo for testing.")
         sys.exit(0)
 
+    # Fetch Torvik schedule for conf_game / neutral_site flags
+    print("  Fetching schedule context from Torvik...")
+    schedule_info = fetch_torvik_schedule(target_date)
+    print(f"  Schedule: {len(schedule_info)} games found")
+
     conn = sqlite3.connect(DB)
     bets = []
 
@@ -365,7 +427,7 @@ if __name__ == '__main__':
             continue
         try:
             row, hn, an = build_features(g['home_team'], g['away_team'],
-                                         spread, target_date, conn, feature_cols, norm_fn)
+                                         spread, target_date, conn, feature_cols, norm_fn, schedule_info)
         except Exception as e:
             print(f"  ERROR {g['home_team']} vs {g['away_team']}: {e}")
             continue
