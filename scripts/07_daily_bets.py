@@ -158,10 +158,17 @@ def fetch_todays_lines(target_date):
 
 
 def parse_lines(odds_data, target_date):
+    from datetime import timezone
+    now_utc = datetime.now(timezone.utc)
     games = []
     for game in odds_data:
         gdt = datetime.fromisoformat(game['commence_time'].replace('Z', '+00:00'))
         if gdt.date() != target_date:
+            continue
+        if gdt <= now_utc:
+            home = game.get('home_team', 'Unknown')
+            away = game.get('away_team', 'Unknown')
+            print(f"  SKIP (already tipped): {away} @ {home}")
             continue
         home  = game.get('home_team', '')
         away  = game.get('away_team', '')
