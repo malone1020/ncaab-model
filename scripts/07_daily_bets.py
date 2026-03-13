@@ -117,7 +117,7 @@ def fetch_todays_lines(target_date):
         print("  WARNING: ODDS_API_KEY not set. Use --demo to test.")
         return []
     url = "https://api.the-odds-api.com/v4/sports/basketball_ncaab/odds/"
-    params = {'apiKey': ODDS_KEY, 'regions': 'us', 'markets': 'spreads',
+    params = {'apiKey': ODDS_KEY, 'regions': 'us', 'markets': 'spreads,totals,h2h',
               'bookmakers': 'draftkings', 'oddsFormat': 'american'}
     try:
         r = requests.get(url, params=params, timeout=15)
@@ -138,18 +138,35 @@ def parse_lines(odds_data, target_date):
         gdt = datetime.fromisoformat(game['commence_time'].replace('Z', '+00:00'))
         if gdt.date() != target_date:
             continue
-        home, away, spread = game.get('home_team',''), game.get('away_team',''), None
+        home  = game.get('home_team', '')
+        away  = game.get('away_team', '')
+        spread = ml_home = ml_away = total = None
         for book in game.get('bookmakers', []):
             if book['key'] != 'draftkings': continue
             for mkt in book.get('markets', []):
-                if mkt['key'] != 'spreads': continue
-                for oc in mkt.get('outcomes', []):
-                    if oc['name'] == home:
-                        try: spread = float(oc['point'])
+                if mkt['key'] == 'spreads':
+                    for oc in mkt.get('outcomes', []):
+                        if oc['name'] == home:
+                            try: spread = float(oc['point'])
+                            except: pass
+                elif mkt['key'] == 'h2h':
+                    for oc in mkt.get('outcomes', []):
+                        try:
+                            if oc['name'] == home:   ml_home = int(oc['price'])
+                            elif oc['name'] == away: ml_away = int(oc['price'])
                         except: pass
+                elif mkt['key'] == 'totals':
+                    for oc in mkt.get('outcomes', []):
+                        if oc.get('name') == 'Over':
+                            try: total = float(oc['point'])
+                            except: pass
         if spread is not None:
-            games.append({'home_team': home, 'away_team': away,
-                          'spread': spread, 'game_time': gdt})
+            games.append({
+                'home_team': home, 'away_team': away,
+                'spread': spread, 'total': total,
+                'ml_home': ml_home, 'ml_away': ml_away,
+                'game_time': gdt,
+            })
     return games
 
 
@@ -249,30 +266,49 @@ def kelly_size(ev, bankroll):
     return round(bankroll * min(kelly * KELLY_FRAC, MAX_BET_PCT), 2)
 
 
+def format_bet_line(b):
+    btype = b.get('bet_type', 'spread')
+    if btype == 'total':
+        direction = b.get('total_dir', 'Over')
+        line = f"{direction} {b.get('total','?')}"
+        line_short = f"{direction[0]}{b.get('total','?')}"
+        return line_short, line
+    elif btype == 'ml':
+        team = b['home_norm'] if b['bet_side'] == 'home' else b['away_norm']
+        ml = b.get('ml_home') if b['bet_side'] == 'home' else b.get('ml_away')
+        ml_str = f"{ml:+d}" if ml else "ML"
+        return ml_str, f"{team} ML {ml_str}"
+    else:  # spread
+        team = b['home_norm'] if b['bet_side'] == 'home' else b['away_norm']
+        side = 'HOME' if b['bet_side'] == 'home' else 'AWAY'
+        sprd = b['spread'] if b['bet_side'] == 'home' else -b['spread']
+        return f"{sprd:+.1f}", f"{team} {sprd:+.1f} ({side})"
+
+
 def print_card(bets, target_date, bankroll, ev_thresh):
-    print("\n" + "="*72)
+    print("\n" + "="*78)
     print(f"  NCAAB BET CARD — {target_date.strftime('%A, %B %d %Y')}")
-    print(f"  Bankroll: ${bankroll:,.0f} | EV≥{ev_thresh*100:.0f}% | Spreads {SPREAD_LO}-{SPREAD_HI}pt")
-    print("="*72)
+    print(f"  Bankroll: ${bankroll:,.0f} | EV≥{ev_thresh*100:.0f}%")
+    print("="*78)
     if not bets:
         print("  No qualifying bets today.")
-        print("="*72)
+        print("="*78)
         return
-    total = sum(b['bet_size'] for b in bets)
-    print(f"  {len(bets)} bet(s) | Total exposure: ${total:,.0f} ({total/bankroll*100:.1f}%)")
-    print(f"\n  {'MATCHUP':<38} {'LINE':>5} {'P':>6} {'EV':>7}  {'BET':<22} {'SIZE':>7}")
-    print("  " + "-"*70)
+    total_risk = sum(b['bet_size'] for b in bets)
+    print(f"  {len(bets)} bet(s) | Total at risk: ${total_risk:,.0f} ({total_risk/bankroll*100:.1f}%)")
+    print(f"\n  {'MATCHUP':<34} {'TYPE':<8} {'LINE':>7} {'P(W)':>6} {'EV':>7}  {'BET ON':<24} {'SIZE':>7}")
+    print("  " + "-"*78)
     for b in sorted(bets, key=lambda x: -x['ev']):
         matchup = f"{b['away_norm']} @ {b['home_norm']}"
-        if len(matchup) > 37: matchup = matchup[:34] + "..."
-        side  = 'HOME' if b['bet_side'] == 'home' else 'AWAY'
-        team  = b['home_norm'] if b['bet_side'] == 'home' else b['away_norm']
-        if len(team) > 21: team = team[:18] + "..."
+        if len(matchup) > 33: matchup = matchup[:30] + "..."
+        btype = b.get('bet_type', 'SPREAD').upper()
+        line_short, bet_desc = format_bet_line(b)
+        if len(bet_desc) > 23: bet_desc = bet_desc[:20] + "..."
         fm = " ★" if b.get('has_fanmatch') else "  "
-        print(f"  {matchup:<38} {b['spread']:>+5.1f} {b['p_cover']:>6.3f} {b['ev']:>+7.3f}  {team+' ('+side+')' :<22} ${b['bet_size']:>6,.0f}{fm}")
-    print("  " + "-"*70)
-    print("  ★ KenPom fanmatch available  |  ¼-Kelly sizing, max 2% per game")
-    print("="*72)
+        print(f"  {matchup:<34} {btype:<8} {line_short:>7} {b['p_cover']:>6.3f} {b['ev']:>+7.3f}  {bet_desc:<24} ${b['bet_size']:>6,.0f}{fm}")
+    print("  " + "-"*78)
+    print("  ★ KenPom fanmatch  |  Types: SPREAD / TOTAL / ML  |  ¼-Kelly, max 2% bankroll")
+    print("="*78)
 
 
 if __name__ == '__main__':
