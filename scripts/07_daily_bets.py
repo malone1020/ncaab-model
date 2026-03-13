@@ -47,7 +47,7 @@ BANKROLL    = 10000
 def load_model():
     if not os.path.exists(MODEL_PKL):
         print(f"ERROR: {MODEL_PKL} not found. Run 06_train_final_model.py first.")
-        return None, None, None
+        return None, None, None, None, None, None
     with open(MODEL_PKL, 'rb') as f:
         model = pickle.load(f)
     with open(IMPUTER_F, 'rb') as f:
@@ -56,8 +56,33 @@ def load_model():
         meta = json.load(f)
     features = meta['features'] if isinstance(meta, dict) else meta
     combo = meta.get('combo', 'unknown') if isinstance(meta, dict) else 'unknown'
-    print(f"  Model: {combo} | {len(features)} features")
-    return model, imputer, features
+    print(f"  Spread model: {combo} | {len(features)} features")
+
+    # Load totals model if available
+    totals_model = totals_imputer = totals_features = None
+    totals_pkl  = os.path.join(ROOT, 'models', 'totals_model.pkl')
+    totals_imp  = os.path.join(ROOT, 'models', 'totals_imputer.pkl')
+    totals_feat = os.path.join(ROOT, 'models', 'totals_feature_cols.json')
+    if os.path.exists(totals_pkl):
+        with open(totals_pkl, 'rb') as f:  totals_model   = pickle.load(f)
+        with open(totals_imp, 'rb') as f:  totals_imputer = pickle.load(f)
+        with open(totals_feat) as f:
+            tm = json.load(f)
+            totals_features = tm['features'] if isinstance(tm, dict) else tm
+        print(f"  Totals model: {len(totals_features)} features")
+    else:
+        print(f"  Totals model: not found (run 08_train_totals_model.py)")
+
+    # Load ML params if available
+    ml_params = None
+    ml_path = os.path.join(ROOT, 'models', 'ml_params.json')
+    if os.path.exists(ml_path):
+        with open(ml_path) as f: ml_params = json.load(f)
+        print(f"  ML params: sigma={ml_params['margin_std']:.2f}")
+    else:
+        print(f"  ML params: not found (run 09_train_ml_model.py)")
+
+    return model, imputer, features, totals_model, totals_imputer, totals_features, ml_params
 
 
 # OddsAPI uses full names like "Tennessee Volunteers" — strip nicknames to match Torvik
@@ -338,6 +363,29 @@ def build_features(home_raw, away_raw, spread, target_date, conn, feature_cols, 
 
 def compute_ev(p): return p * (1 + PAYOUT) - 1
 
+def compute_ml_ev(p_win, ml):
+    """EV for a moneyline bet given P(win) and American odds."""
+    ml = float(ml)
+    payout = (ml / 100) if ml > 0 else (100 / abs(ml))
+    return p_win * payout - (1 - p_win)
+
+def p_cover_to_p_win(p_cover, spread, sigma):
+    """
+    Convert P(home covers spread) → P(home wins outright) using normal distribution.
+    spread is negative for home favorites (e.g., -3.5).
+    """
+    from scipy.stats import norm
+    cover_threshold = -spread   # home needs to win by this many points
+    z  = norm.ppf(1 - p_cover)
+    mu = cover_threshold - sigma * z
+    return float(np.clip(norm.sf(0, loc=mu, scale=sigma), 0.01, 0.99))
+
+def ml_kelly_size(ev, bankroll, kelly_frac=KELLY_FRAC, max_pct=MAX_BET_PCT):
+    """Kelly sizing for ML bets (payout varies, not fixed -110)."""
+    # ev = p*payout - (1-p), solve for p: p = (ev+1)/(payout+1)
+    # We approximate payout from ev (not perfect but close enough for sizing)
+    return kelly_size(ev, bankroll, kelly_frac, max_pct)
+
 def kelly_size(ev, bankroll):
     p = (ev + 1) / (1 + PAYOUT)
     q = 1 - p
@@ -407,7 +455,15 @@ if __name__ == '__main__':
     print(f"\nNCAAB Daily Bets — {target_date}")
     print("="*50)
 
-    model, imputer, feature_cols = load_model()
+    # Load all models
+    result = load_model()
+    model, imputer, feature_cols = result[0], result[1], result[2]
+    totals_model    = result[3] if len(result) > 3 else None
+    totals_imputer  = result[4] if len(result) > 4 else None
+    totals_features = result[5] if len(result) > 5 else None
+    ml_params       = result[6] if len(result) > 6 else None
+    ml_sigma        = ml_params['margin_std'] if ml_params else 11.5  # fallback
+
     if not model: sys.exit(1)
 
     try:
@@ -418,9 +474,12 @@ if __name__ == '__main__':
 
     if args.demo:
         games = [
-            {'home_team': 'Duke',    'away_team': 'North Carolina', 'spread': -4.5, 'game_time': datetime.now()},
-            {'home_team': 'Kansas',  'away_team': 'Baylor',         'spread': -3.0, 'game_time': datetime.now()},
-            {'home_team': 'Gonzaga', 'away_team': "Saint Mary's",   'spread': -6.5, 'game_time': datetime.now()},
+            {'home_team': 'Duke',    'away_team': 'North Carolina', 'spread': -4.5,
+             'total': 145.5, 'ml_home': -180, 'ml_away': 150, 'game_time': datetime.now()},
+            {'home_team': 'Kansas',  'away_team': 'Baylor',         'spread': -3.0,
+             'total': 152.0, 'ml_home': -145, 'ml_away': 122, 'game_time': datetime.now()},
+            {'home_team': 'Gonzaga', 'away_team': "Saint Mary's",   'spread': -6.5,
+             'total': 148.5, 'ml_home': -240, 'ml_away': 198, 'game_time': datetime.now()},
         ]
         print(f"  DEMO MODE: {len(games)} games")
     else:
@@ -440,58 +499,138 @@ if __name__ == '__main__':
     conn = sqlite3.connect(DB)
     bets = []
 
-    print(f"\nScoring {len(games)} game(s)...")
-    print(f"  {'Game':<44} {'P(cvr)':>7} {'EDGE':>7} {'EV':>8}  Status")
-    print("  " + "-"*68)
+    print(f"\nScoring {len(games)} game(s) across SPREAD / TOTAL / ML markets...")
+    print(f"  {'Game':<40} {'MKT':<7} {'P':>6} {'EDGE':>7} {'EV':>8}  Status")
+    print("  " + "-"*74)
 
     for g in games:
-        spread = g['spread']
-        if not (SPREAD_LO <= abs(spread) <= SPREAD_HI):
-            hn_raw = norm_fn(g['home_team'])
-            an_raw = norm_fn(g['away_team'])
-            label  = f"{an_raw} @ {hn_raw}"
-            if len(label) > 44: label = label[:41] + "..."
-            print(f"  {label:<44} {'—':>7} {'—':>7} {'—':>8}  SKIP (spread {spread:+.1f} outside {SPREAD_LO}-{SPREAD_HI}pt range)")
-            continue
-        try:
-            row, hn, an = build_features(g['home_team'], g['away_team'],
-                                         spread, target_date, conn, feature_cols, norm_fn, schedule_info)
-        except Exception as e:
-            print(f"  ERROR {g['home_team']} vs {g['away_team']}: {e}")
-            continue
+        spread  = g['spread']
+        total   = g.get('total')
+        ml_home = g.get('ml_home')
+        ml_away = g.get('ml_away')
 
-        X    = pd.DataFrame([row])[feature_cols]
-        Ximp = pd.DataFrame(imputer.transform(X), columns=feature_cols)
-        p    = float(model.predict_proba(Ximp)[0][1])
+        label = f"{norm_fn(g['away_team'])} @ {norm_fn(g['home_team'])}"
+        if len(label) > 39: label = label[:36] + "..."
 
-        ev_h = compute_ev(p)
-        ev_a = compute_ev(1 - p)
-        best_ev  = max(ev_h, ev_a)
-        bet_side = 'home' if ev_h >= ev_a else 'away'
-        p_disp   = p if bet_side == 'home' else (1 - p)
+        # ── SPREAD ────────────────────────────────────────────────────────
+        if SPREAD_LO <= abs(spread) <= SPREAD_HI:
+            try:
+                row, hn, an = build_features(
+                    g['home_team'], g['away_team'],
+                    spread, target_date, conn, feature_cols, norm_fn, schedule_info
+                )
+                X    = pd.DataFrame([row])[feature_cols]
+                Ximp = pd.DataFrame(imputer.transform(X), columns=feature_cols)
+                p    = float(model.predict_proba(Ximp)[0][1])  # P(home covers)
 
-        label = f"{an} @ {hn}"
-        if len(label) > 43: label = label[:40] + "..."
-        qualifies = best_ev >= ev_thresh
-        status = f"✓ BET {('HOME' if bet_side=='home' else 'AWAY')}" if qualifies else "—"
-        edge_disp = (p_disp - 0.5238) * 100
-        print(f"  {label:<44} {p_disp:>7.3f} {edge_disp:>+6.1f}% {best_ev:>+8.3f}  {status}")
+                ev_h = compute_ev(p)
+                ev_a = compute_ev(1 - p)
+                best_spread_ev  = max(ev_h, ev_a)
+                spread_side = 'home' if ev_h >= ev_a else 'away'
+                p_spread = p if spread_side == 'home' else (1 - p)
+                edge_spread = (p_spread - 0.5238) * 100
 
-        if qualifies:
-            sz = kelly_size(best_ev, bankroll)
-            if sz >= 10:
-                bets.append({
-                    'home_team': g['home_team'], 'away_team': g['away_team'],
-                    'home_norm': hn, 'away_norm': an,
-                    'bet_norm':  hn if bet_side=='home' else an,
-                    'spread': spread, 'p_cover': p_disp, 'ev': best_ev,
-                    'edge_pts': round((p_disp - 0.5238) * 100, 1),  # pts above breakeven 52.38%
-                    'bet_side': bet_side, 'bet_size': sz,
-                    'game_time': str(g['game_time']),
-                    'has_fanmatch': bool(row.get('has_kp_fanmatch')),
-                })
+                qualifies = best_spread_ev >= ev_thresh
+                status = f"✓ BET {'HOME' if spread_side=='home' else 'AWAY'}" if qualifies else "—"
+                print(f"  {label:<40} {'SPREAD':<7} {p_spread:>6.3f} {edge_spread:>+6.1f}% {best_spread_ev:>+8.3f}  {status}")
+
+                if qualifies:
+                    sz = kelly_size(best_spread_ev, bankroll)
+                    if sz >= 10:
+                        sprd_display = spread if spread_side == 'home' else -spread
+                        bets.append({
+                            'home_team': g['home_team'], 'away_team': g['away_team'],
+                            'home_norm': hn, 'away_norm': an,
+                            'spread': sprd_display, 'total': total,
+                            'ml_home': ml_home, 'ml_away': ml_away,
+                            'p_cover': p_spread, 'ev': best_spread_ev,
+                            'edge_pts': round(edge_spread, 1),
+                            'bet_side': spread_side, 'bet_size': sz,
+                            'bet_type': 'spread', 'game_time': str(g['game_time']),
+                            'has_fanmatch': bool(row.get('has_kp_fanmatch')),
+                        })
+
+                # ── MONEYLINE (derived from spread model) ─────────────────
+                if ml_home is not None and ml_away is not None:
+                    p_win = p_cover_to_p_win(p, spread, ml_sigma)
+                    ev_ml_h = compute_ml_ev(p_win,       ml_home)
+                    ev_ml_a = compute_ml_ev(1 - p_win,   ml_away)
+                    best_ml_ev  = max(ev_ml_h, ev_ml_a)
+                    ml_side = 'home' if ev_ml_h >= ev_ml_a else 'away'
+                    p_ml    = p_win if ml_side == 'home' else (1 - p_win)
+                    edge_ml = (p_ml - 0.5238) * 100  # vs fair 50/50 baseline
+
+                    qual_ml = best_ml_ev >= ev_thresh
+                    status_ml = f"✓ BET {'HOME' if ml_side=='home' else 'AWAY'}" if qual_ml else "—"
+                    ml_display = ml_home if ml_side == 'home' else ml_away
+                    print(f"  {label:<40} {'ML':<7} {p_ml:>6.3f} {edge_ml:>+6.1f}% {best_ml_ev:>+8.3f}  {status_ml}")
+
+                    if qual_ml:
+                        sz_ml = kelly_size(best_ml_ev, bankroll)
+                        if sz_ml >= 10:
+                            bets.append({
+                                'home_team': g['home_team'], 'away_team': g['away_team'],
+                                'home_norm': hn, 'away_norm': an,
+                                'spread': spread, 'total': total,
+                                'ml_home': ml_home, 'ml_away': ml_away,
+                                'p_cover': p_ml, 'ev': best_ml_ev,
+                                'edge_pts': round(edge_ml, 1),
+                                'bet_side': ml_side, 'bet_size': sz_ml,
+                                'bet_type': 'ml', 'game_time': str(g['game_time']),
+                                'has_fanmatch': bool(row.get('has_kp_fanmatch')),
+                            })
+
+            except Exception as e:
+                print(f"  {label:<40} {'SPREAD':<7} ERROR: {e}")
+
+        else:
+            print(f"  {label:<40} {'SPREAD':<7} {'—':>6} {'—':>7} {'—':>8}  SKIP ({spread:+.1f} outside {SPREAD_LO}-{SPREAD_HI}pt)")
+
+        # ── TOTALS ────────────────────────────────────────────────────────
+        if totals_model is not None and total is not None:
+            try:
+                # Build features for totals — reuse spread feature row, add total
+                row_t, hn_t, an_t = build_features(
+                    g['home_team'], g['away_team'],
+                    spread, target_date, conn, totals_features, norm_fn, schedule_info
+                )
+                row_t['over_under'] = total
+                X_t    = pd.DataFrame([row_t])[totals_features]
+                Ximp_t = pd.DataFrame(totals_imputer.transform(X_t), columns=totals_features)
+                p_over = float(totals_model.predict_proba(Ximp_t)[0][1])
+
+                ev_over  = compute_ev(p_over)
+                ev_under = compute_ev(1 - p_over)
+                best_tot_ev = max(ev_over, ev_under)
+                tot_dir  = 'over' if ev_over >= ev_under else 'under'
+                p_tot    = p_over if tot_dir == 'over' else (1 - p_over)
+                edge_tot = (p_tot - 0.5238) * 100
+
+                qual_tot = best_tot_ev >= ev_thresh
+                status_tot = f"✓ BET {'OVER' if tot_dir=='over' else 'UNDER'}" if qual_tot else "—"
+                tot_label = f"{('O' if tot_dir=='over' else 'U')}{total}"
+                print(f"  {label:<40} {f'TOTAL {tot_label}':<7} {p_tot:>6.3f} {edge_tot:>+6.1f}% {best_tot_ev:>+8.3f}  {status_tot}")
+
+                if qual_tot:
+                    sz_t = kelly_size(best_tot_ev, bankroll)
+                    if sz_t >= 10:
+                        bets.append({
+                            'home_team': g['home_team'], 'away_team': g['away_team'],
+                            'home_norm': hn_t, 'away_norm': an_t,
+                            'spread': spread, 'total': total,
+                            'ml_home': ml_home, 'ml_away': ml_away,
+                            'p_cover': p_tot, 'ev': best_tot_ev,
+                            'edge_pts': round(edge_tot, 1),
+                            'bet_side': tot_dir, 'bet_size': sz_t,
+                            'bet_type': 'total', 'total_dir': tot_dir.capitalize(),
+                            'game_time': str(g['game_time']),
+                            'has_fanmatch': bool(row_t.get('has_kp_fanmatch')),
+                        })
+            except Exception as e:
+                print(f"  {label:<40} {'TOTAL':<7} ERROR: {e}")
 
     conn.close()
+    print()
     print_card(bets, target_date, bankroll, ev_thresh)
 
     if bets:
