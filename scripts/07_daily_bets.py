@@ -296,19 +296,20 @@ def print_card(bets, target_date, bankroll, ev_thresh):
         return
     total_risk = sum(b['bet_size'] for b in bets)
     print(f"  {len(bets)} bet(s) | Total at risk: ${total_risk:,.0f} ({total_risk/bankroll*100:.1f}%)")
-    print(f"\n  {'MATCHUP':<34} {'TYPE':<8} {'LINE':>7} {'P(W)':>6} {'EV':>7}  {'BET ON':<24} {'SIZE':>7}")
-    print("  " + "-"*78)
+    print(f"\n  {'MATCHUP':<32} {'TYPE':<8} {'LINE':>7} {'P(W)':>6} {'EDGE':>6} {'EV':>7}  {'BET ON':<24} {'SIZE':>7}")
+    print("  " + "-"*82)
     for b in sorted(bets, key=lambda x: -x['ev']):
         matchup = f"{b['away_norm']} @ {b['home_norm']}"
-        if len(matchup) > 33: matchup = matchup[:30] + "..."
+        if len(matchup) > 31: matchup = matchup[:28] + "..."
         btype = b.get('bet_type', 'SPREAD').upper()
         line_short, bet_desc = format_bet_line(b)
         if len(bet_desc) > 23: bet_desc = bet_desc[:20] + "..."
         fm = " ★" if b.get('has_fanmatch') else "  "
-        print(f"  {matchup:<34} {btype:<8} {line_short:>7} {b['p_cover']:>6.3f} {b['ev']:>+7.3f}  {bet_desc:<24} ${b['bet_size']:>6,.0f}{fm}")
-    print("  " + "-"*78)
-    print("  ★ KenPom fanmatch  |  Types: SPREAD / TOTAL / ML  |  ¼-Kelly, max 2% bankroll")
-    print("="*78)
+        edge = b.get('edge_pts', 0)
+        print(f"  {matchup:<32} {btype:<8} {line_short:>7} {b['p_cover']:>6.3f} {edge:>+5.1f}% {b['ev']:>+7.3f}  {bet_desc:<24} ${b['bet_size']:>6,.0f}{fm}")
+    print("  " + "-"*82)
+    print("  ★ KenPom fanmatch  |  EDGE = P(win) − 52.38% breakeven  |  ¼-Kelly, max 2%")
+    print("="*82)
 
 
 if __name__ == '__main__':
@@ -355,7 +356,7 @@ if __name__ == '__main__':
     bets = []
 
     print(f"\nScoring {len(games)} game(s)...")
-    print(f"  {'Game':<44} {'P(cvr)':>7} {'EV':>8}  Status")
+    print(f"  {'Game':<44} {'P(cvr)':>7} {'EDGE':>7} {'EV':>8}  Status")
     print("  " + "-"*68)
 
     for g in games:
@@ -383,7 +384,8 @@ if __name__ == '__main__':
         if len(label) > 43: label = label[:40] + "..."
         qualifies = best_ev >= ev_thresh
         status = f"✓ BET {('HOME' if bet_side=='home' else 'AWAY')}" if qualifies else "—"
-        print(f"  {label:<44} {p_disp:>7.3f} {best_ev:>+8.3f}  {status}")
+        edge_disp = (p_disp - 0.5238) * 100
+        print(f"  {label:<44} {p_disp:>7.3f} {edge_disp:>+6.1f}% {best_ev:>+8.3f}  {status}")
 
         if qualifies:
             sz = kelly_size(best_ev, bankroll)
@@ -393,6 +395,7 @@ if __name__ == '__main__':
                     'home_norm': hn, 'away_norm': an,
                     'bet_norm':  hn if bet_side=='home' else an,
                     'spread': spread, 'p_cover': p_disp, 'ev': best_ev,
+                    'edge_pts': round((p_disp - 0.5238) * 100, 1),  # pts above breakeven 52.38%
                     'bet_side': bet_side, 'bet_size': sz,
                     'game_time': str(g['game_time']),
                     'has_fanmatch': bool(row.get('has_kp_fanmatch')),
