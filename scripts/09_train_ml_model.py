@@ -143,58 +143,41 @@ def compute_ml_ev(p_win, ml):
 
 def calibrate_and_validate(lines, sigma):
     """
-    Validate the conversion method against actual outcomes.
-    Shows how well p_cover → p_win converts vs actual win rates.
+    Validate the normal distribution approximation by checking
+    how well market spread → P(win) matches actual win rates by bucket.
     """
-    print("\n--- ML Conversion Validation ---")
-    print("(Comparing implied P(win) from spread to actual win rate)")
-
-    # Use the spread to estimate p_cover via market efficiency
-    # (market spread is our best pre-game estimate)
-    # Then convert to p_win and compare to actual
+    print("\n--- ML Conversion Sanity Check ---")
+    print("(Validating normal dist approximation: spread bucket vs actual win rate)")
     from scipy.stats import norm
 
-    # Market-implied p_cover from spread (at -110)
-    # A team's spread already encodes the market's view on P(cover)
-    # For a -3.5 favorite, market implies roughly 55-56% cover probability
-
-    # Compute implied p_cover from market spread assuming normal dist
     lines = lines.copy()
-    # cover_threshold = how many points home needs to win by
-    lines['cover_threshold'] = -lines['spread']
-    # Market implied P(cover) — center at 0 residual relative to spread
-    lines['market_p_cover'] = norm.sf(lines['cover_threshold'], loc=0, scale=sigma)
-
-    # Convert to p_win
-    lines['implied_p_win'] = lines.apply(
-        lambda r: p_cover_to_p_win(r['market_p_cover'], r['spread'], sigma), axis=1
+    # Market-implied P(home wins) from spread using normal dist
+    # spread is negative for home favorites: -3.5 means home expected margin = +3.5
+    lines['market_p_win'] = lines['spread'].apply(
+        lambda s: float(np.clip(norm.sf(0, loc=-s, scale=sigma), 0.01, 0.99))
     )
 
-    # Bucket by implied p_win and check calibration
-    lines['p_win_bucket'] = pd.cut(lines['implied_p_win'],
-                                    bins=[0, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 1.0],
-                                    labels=['<40%','40-45%','45-50%','50-55%',
-                                            '55-60%','60-65%','65-70%','>70%'])
+    lines['bucket'] = pd.cut(lines['market_p_win'],
+                              bins=[0, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 1.0],
+                              labels=['<30%','30-40%','40-50%','50-60%','60-70%','70-80%','>80%'])
 
-    cal = lines.groupby('p_win_bucket').agg(
+    cal = lines.groupby('bucket').agg(
         n=('home_won','count'),
         actual_win_rate=('home_won','mean'),
-        avg_implied=('implied_p_win','mean')
+        avg_market_p=('market_p_win','mean')
     ).dropna()
 
-    print(f"\n  {'Bucket':<10} {'N':>6} {'Implied':>9} {'Actual':>9} {'Diff':>8}")
-    print("  " + "-"*50)
+    print(f"\n  {'Bucket':<10} {'N':>7} {'Mkt P(W)':>9} {'Actual':>9} {'Diff':>8}")
+    print("  " + "-"*52)
     for bucket, row in cal.iterrows():
-        diff = row['actual_win_rate'] - row['avg_implied']
-        print(f"  {str(bucket):<10} {row['n']:>6,} {row['avg_implied']:>9.3f} "
+        diff = row['actual_win_rate'] - row['avg_market_p']
+        print(f"  {str(bucket):<10} {int(row['n']):>7,} {row['avg_market_p']:>9.3f} "
               f"{row['actual_win_rate']:>9.3f} {diff:>+8.3f}")
 
-    # Overall calibration error
-    mae = abs(cal['actual_win_rate'] - cal['avg_implied']).mean()
-    print(f"\n  Mean calibration error: {mae:.4f} ({mae*100:.2f}%)")
-
+    mae = abs(cal['actual_win_rate'] - cal['avg_market_p']).mean()
+    print(f"\n  Mean error: {mae:.4f} — lower = normal dist is good fit")
+    print(f"  sigma={sigma:.2f} is used to convert model P(cover) → P(win)")
     return cal
-
 
 def validate_ml_ev(lines, sigma):
     """

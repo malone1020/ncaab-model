@@ -136,13 +136,11 @@ def build_totals_features(df, lines):
     available = [f for f in all_feats if f in merged.columns]
     missing   = [f for f in all_feats if f not in merged.columns]
     if missing:
-        print(f"  Missing features (will use NaN): {missing}")
+        print(f"  Dropping unavailable features: {missing}")
 
-    # Add any missing as NaN
-    for f in missing:
-        merged[f] = np.nan
-
-    return merged, all_feats
+    # Only use features that actually exist — all-NaN columns cause imputer shape mismatch
+    print(f"  Using {len(available)} features (dropped {len(missing)} unavailable)")
+    return merged, available
 
 
 def walk_forward_validate(df, features, target='went_over'):

@@ -551,19 +551,31 @@ if __name__ == '__main__':
                         })
 
                 # ── MONEYLINE (derived from spread model) ─────────────────
+                # ML odds filter: only bet when line is between +200 and -400
+                # Avoids big underdogs (+300/+400/+500) where market has
+                # non-model info (injuries, lineup changes) and liquidity is thin.
+                ML_MIN = -400   # won't bet bigger favorites than -400
+                ML_MAX = +200   # won't bet underdogs longer than +200
                 if ml_home is not None and ml_away is not None:
                     p_win = p_cover_to_p_win(p, spread, ml_sigma)
                     ev_ml_h = compute_ml_ev(p_win,       ml_home)
                     ev_ml_a = compute_ml_ev(1 - p_win,   ml_away)
-                    best_ml_ev  = max(ev_ml_h, ev_ml_a)
-                    ml_side = 'home' if ev_ml_h >= ev_ml_a else 'away'
-                    p_ml    = p_win if ml_side == 'home' else (1 - p_win)
-                    edge_ml = (p_ml - 0.5238) * 100  # vs fair 50/50 baseline
 
-                    qual_ml = best_ml_ev >= ev_thresh
-                    status_ml = f"✓ BET {'HOME' if ml_side=='home' else 'AWAY'}" if qual_ml else "—"
-                    ml_display = ml_home if ml_side == 'home' else ml_away
-                    print(f"  {label:<40} {'ML':<7} {p_ml:>6.3f} {edge_ml:>+6.1f}% {best_ml_ev:>+8.3f}  {status_ml}")
+                    # Determine best side and check odds are in range
+                    if ev_ml_h >= ev_ml_a:
+                        ml_side, p_ml, best_ml_ev, ml_odds = 'home', p_win, ev_ml_h, ml_home
+                    else:
+                        ml_side, p_ml, best_ml_ev, ml_odds = 'away', 1-p_win, ev_ml_a, ml_away
+
+                    # Apply odds filter
+                    ml_in_range = ML_MIN <= ml_odds <= ML_MAX if ml_odds < 0 else ml_odds <= ML_MAX
+                    edge_ml = (p_ml - 0.5238) * 100
+
+                    qual_ml = best_ml_ev >= ev_thresh and ml_in_range
+                    if ml_in_range:
+                        status_ml = f"✓ BET {'HOME' if ml_side=='home' else 'AWAY'}" if qual_ml else "—"
+                        print(f"  {label:<40} {'ML':<7} {p_ml:>6.3f} {edge_ml:>+6.1f}% {best_ml_ev:>+8.3f}  {status_ml}")
+                    # Skip printing lines outside odds range (too short or too long)
 
                     if qual_ml:
                         sz_ml = kelly_size(best_ml_ev, bankroll)
