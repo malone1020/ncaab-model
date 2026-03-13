@@ -116,10 +116,11 @@ FEATURE_GROUPS = {
 
 # Clean sources (no look-ahead leakage) — use for primary backtest
 CLEAN_SOURCES   = ['TVD','KPD','KP_FANMATCH','ROLLING','TRAVEL','REFS','RECENCY','EXPERIENCE']
-# Leaky sources (season-final ratings) — kept for reference only
+# Leaky sources (season-final ratings) — NOT included in backtest.
+# Their ~22% ROI is ~3x inflated vs clean combos and unusable in production.
 LEAKY_SOURCES   = ['TVS','KP','HA_CORE','HA_SHOT','HA_DELTA','HA_MATCHUP']
-# Test all clean combos + optionally leaky for comparison
-OPTIONAL_SOURCES = CLEAN_SOURCES + LEAKY_SOURCES
+# Only test clean combos: 2^8 - 1 = 255 combos, ~20 min runtime
+OPTIONAL_SOURCES = CLEAN_SOURCES
 SPREAD_MIN, SPREAD_MAX = 0.5, 9.0
 EV_MIN     = 0.03       # minimum EV threshold: P(cover)*1.909 - 1 >= 0.03
 PAYOUT     = 100 / 110  # -110 juice
@@ -256,24 +257,15 @@ print(f"\nCompleted {done} combos, {len(results)} with sufficient data")
 res_df = pd.DataFrame(results).sort_values('roi', ascending=False)
 res_df.to_csv(os.path.join(OUT_DIR, 'combo_backtest_results.csv'), index=False)
 
-clean_df = res_df[~res_df['leaky']]
-leaky_df = res_df[res_df['leaky']]
-
 print("\n" + "="*90)
-print("TOP 10 CLEAN COMBOS (no look-ahead leakage) — BY OUT-OF-SAMPLE ROI")
+print("TOP 10 CLEAN COMBOS — BY OUT-OF-SAMPLE ROI (all combos are clean in this run)")
 print("="*90)
 print(f"{'Combo':<60} {'Bets':>6} {'WR':>6} {'ROI':>7} {'AvgEV':>7}")
 print("-"*90)
-for _, r in clean_df.head(10).iterrows():
+for _, r in res_df.head(10).iterrows():
     print(f"{r['combo']:<60} {r['n_bets']:>6} {r['win_rate']:>6.3f} {r['roi']:>+7.3f} {r['avg_ev']:>+7.3f}")
 
-print("\n" + "="*90)
-print("TOP 5 LEAKY COMBOS (season-final data — for reference only)")
-print("="*90)
-for _, r in leaky_df.head(5).iterrows():
-    print(f"{r['combo']:<60} {r['n_bets']:>6} {r['win_rate']:>6.3f} {r['roi']:>+7.3f}")
-
-best_clean = clean_df.iloc[0] if not clean_df.empty else res_df.iloc[0]
-print(f"\nBest CLEAN combo: {best_clean['combo']}")
-print(f"  Win rate: {best_clean['win_rate']:.3f} | ROI: {best_clean['roi']:+.4f} | AvgEV: {best_clean['avg_ev']:+.4f} | Bets: {best_clean['n_bets']}")
-print(f"\nNext: python scripts/06_train_final_model.py --combo \"{best_clean['combo']}\"")
+best = res_df.iloc[0]
+print(f"\nBest combo: {best['combo']}")
+print(f"  Win rate: {best['win_rate']:.3f} | ROI: {best['roi']:+.4f} | AvgEV: {best['avg_ev']:+.4f} | Bets: {best['n_bets']}")
+print(f"\nNext: python scripts/06_train_final_model.py --combo \"{best['combo']}\"")
