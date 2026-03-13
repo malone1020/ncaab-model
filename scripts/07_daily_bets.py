@@ -166,9 +166,9 @@ def parse_lines(odds_data, target_date):
         if gdt.date() != target_date:
             continue
         if gdt <= now_utc:
-            home = game.get('home_team', 'Unknown')
-            away = game.get('away_team', 'Unknown')
-            print(f"  SKIP (already tipped): {away} @ {home}")
+            home = game.get('home_team', '')
+            away = game.get('away_team', '')
+            print(f"  SKIPPED (already tipped): {away} @ {home}")
             continue
         home  = game.get('home_team', '')
         away  = game.get('away_team', '')
