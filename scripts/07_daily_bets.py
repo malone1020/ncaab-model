@@ -1,19 +1,21 @@
 """
 07_daily_bets.py
 ================
-Generate today's bet card using the production model.
-Fetches today's DraftKings lines and projects each game.
+Generate today's bet card using the production calibrated model.
+Uses the same feature pipeline as 04_build_features.py.
+EV formula matches the backtest exactly: P(home covers) * 1.909 - 1.
 
 Run: python scripts/07_daily_bets.py
-     python scripts/07_daily_bets.py --date 2025-01-15
+     python scripts/07_daily_bets.py --date 2025-03-15
+     python scripts/07_daily_bets.py --demo
+     python scripts/07_daily_bets.py --bankroll 5000
 """
 
-import sqlite3, os, json, sys, argparse, warnings
+import sqlite3, os, json, sys, argparse, pickle, warnings
 from datetime import date, datetime
 import pandas as pd
 import numpy as np
 import requests
-from xgboost import XGBRegressor
 
 try:
     from dotenv import load_dotenv
@@ -23,254 +25,304 @@ except ImportError:
 
 warnings.filterwarnings('ignore')
 
-ROOT    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB      = os.path.join(ROOT, 'data', 'basketball.db')
-MODEL   = os.path.join(ROOT, 'models', 'production_model.json')
-FEAT_F  = os.path.join(ROOT, 'models', 'feature_cols.json')
-OUT     = os.path.join(ROOT, 'outputs')
+ROOT      = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DB        = os.path.join(ROOT, 'data', 'basketball.db')
+MODEL_PKL = os.path.join(ROOT, 'models', 'production_model.pkl')
+IMPUTER_F = os.path.join(ROOT, 'models', 'imputer.pkl')
+FEAT_F    = os.path.join(ROOT, 'models', 'feature_cols.json')
+OUT_DIR   = os.path.join(ROOT, 'outputs')
+os.makedirs(OUT_DIR, exist_ok=True)
 
-ODDS_KEY     = os.getenv('ODDS_API_KEY', '')
-EDGE_MIN     = 3.0
-SPREAD_LO    = 0.5
-SPREAD_HI    = 9.0
-EXCLUDE_LO   = 9.0
-EXCLUDE_HI   = 12.0
-KELLY_FRAC   = 0.25
-MAX_BET_PCT  = 0.02   # max 2% of bankroll per game
-BANKROLL     = 10000  # default bankroll
-
-
-def get_db():
-    conn = sqlite3.connect(DB)
-    conn.row_factory = sqlite3.Row
-    return conn
+ODDS_KEY    = os.getenv('ODDS_API_KEY', '')
+EV_MIN      = 0.03
+PAYOUT      = 100/110
+SPREAD_LO   = 0.5
+SPREAD_HI   = 9.0
+KELLY_FRAC  = 0.25
+MAX_BET_PCT = 0.02
+BANKROLL    = 10000
 
 
-def load_model_and_features():
-    if not os.path.exists(MODEL):
-        print(f"ERROR: Model not found at {MODEL}")
-        print("Run python scripts/06_train_final_model.py first")
-        return None, None
-
-    model = XGBRegressor()
-    model.load_model(MODEL)
-
+def load_model():
+    if not os.path.exists(MODEL_PKL):
+        print(f"ERROR: {MODEL_PKL} not found. Run 06_train_final_model.py first.")
+        return None, None, None
+    with open(MODEL_PKL, 'rb') as f:
+        model = pickle.load(f)
+    with open(IMPUTER_F, 'rb') as f:
+        imputer = pickle.load(f)
     with open(FEAT_F) as f:
-        feature_cols = json.load(f)
+        meta = json.load(f)
+    features = meta['features'] if isinstance(meta, dict) else meta
+    combo = meta.get('combo', 'unknown') if isinstance(meta, dict) else 'unknown'
+    print(f"  Model: {combo} | {len(features)} features")
+    return model, imputer, features
 
-    return model, feature_cols
+
+def get_norm_func():
+    """Load norm() from 04_build_features.py so team name normalization is shared."""
+    import importlib.util
+    path = os.path.join(ROOT, 'scripts', '04_build_features.py')
+    spec = importlib.util.spec_from_file_location("bfm", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.norm
 
 
-def fetch_todays_lines(target_date=None):
-    """Fetch NCAA basketball lines from OddsAPI."""
+def fetch_todays_lines(target_date):
     if not ODDS_KEY:
-        print("WARNING: No ODDS_API_KEY found. Using demo data.")
+        print("  WARNING: ODDS_API_KEY not set. Use --demo to test.")
         return []
-
     url = "https://api.the-odds-api.com/v4/sports/basketball_ncaab/odds/"
-    params = {
-        'apiKey': ODDS_KEY,
-        'regions': 'us',
-        'markets': 'spreads',
-        'bookmakers': 'draftkings',
-        'oddsFormat': 'american',
-    }
-
+    params = {'apiKey': ODDS_KEY, 'regions': 'us', 'markets': 'spreads',
+              'bookmakers': 'draftkings', 'oddsFormat': 'american'}
     try:
         r = requests.get(url, params=params, timeout=15)
         if r.status_code == 200:
-            return r.json()
-        else:
-            print(f"OddsAPI error: {r.status_code}")
-            return []
+            data = r.json()
+            print(f"  OddsAPI: {len(data)} events | remaining: {r.headers.get('X-Requests-Remaining','?')}")
+            return data
+        print(f"  OddsAPI HTTP {r.status_code}")
+        return []
     except Exception as e:
-        print(f"OddsAPI error: {e}")
+        print(f"  OddsAPI error: {e}")
         return []
 
 
-def parse_lines(odds_data, target_date=None):
-    """Extract game spreads from OddsAPI response."""
+def parse_lines(odds_data, target_date):
     games = []
-    today = target_date or date.today()
-
     for game in odds_data:
-        game_time = datetime.fromisoformat(game['commence_time'].replace('Z', '+00:00'))
-        if game_time.date() != today:
+        gdt = datetime.fromisoformat(game['commence_time'].replace('Z', '+00:00'))
+        if gdt.date() != target_date:
             continue
-
-        home = game.get('home_team', '')
-        away = game.get('away_team', '')
-
-        spread = None
+        home, away, spread = game.get('home_team',''), game.get('away_team',''), None
         for book in game.get('bookmakers', []):
-            if book['key'] != 'draftkings':
-                continue
-            for market in book.get('markets', []):
-                if market['key'] != 'spreads':
-                    continue
-                for outcome in market.get('outcomes', []):
-                    if outcome['name'] == home:
-                        try:
-                            spread = float(outcome['point'])
-                        except:
-                            pass
-
+            if book['key'] != 'draftkings': continue
+            for mkt in book.get('markets', []):
+                if mkt['key'] != 'spreads': continue
+                for oc in mkt.get('outcomes', []):
+                    if oc['name'] == home:
+                        try: spread = float(oc['point'])
+                        except: pass
         if spread is not None:
-            games.append({
-                'home_team': home,
-                'away_team': away,
-                'spread': spread,
-                'game_time': str(game_time),
-            })
-
+            games.append({'home_team': home, 'away_team': away,
+                          'spread': spread, 'game_time': gdt})
     return games
 
 
-def build_game_features(home, away, spread, season, conn, feature_cols):
-    """Build feature row for a single today's game."""
-    from scripts.team_name_map import normalize  # use your normalization
-    home = normalize(home)
-    away = normalize(away)
-
-    # Load latest ratings for each team
-    # (Use current season-1 for static ratings, and latest snapshot for daily Torvik)
-    # This is simplified - in production you'd build full features same as 04_build_features.py
+def build_features(home_raw, away_raw, spread, target_date, conn, feature_cols, norm_fn):
+    home = norm_fn(home_raw)
+    away = norm_fn(away_raw)
+    gd_str = str(target_date)
 
     row = {c: None for c in feature_cols}
-    row['neutral_site'] = 0
-    row['conf_game'] = 0
-    row['spread'] = spread
+    row.update({'neutral_site': 0, 'conf_game': 0, 'spread': spread,
+                'hca_adj': 3.2, 'rest_diff': 0, 'home_rest': 4, 'away_rest': 4,
+                'home_b2b': 0, 'away_b2b': 0})
 
-    # TODO: populate from DB using same logic as 04_build_features.py
-    # This is a stub - the full implementation joins all rating tables
+    def tvd_snap(team):
+        rows = conn.execute("""
+            SELECT adj_em, adj_o, adj_d, adj_t, barthag, wab FROM torvik_daily
+            WHERE team=? ORDER BY snapshot_date DESC""", (team,)).fetchall()
+        for r in rows:
+            sd = conn.execute("SELECT snapshot_date FROM torvik_daily WHERE team=? AND adj_em=? LIMIT 1",
+                              (team, r[0])).fetchone()
+            snap = str(sd[0]) if sd else ''
+            if len(snap) == 8: snap = f"{snap[:4]}-{snap[4:6]}-{snap[6:8]}"
+            if snap[:10] < gd_str: return r
+        return None
 
-    return row
+    def kpd_snap(team):
+        rows = conn.execute("""
+            SELECT snapshot_date, adj_em, adj_o, adj_d, adj_tempo, luck, sos, sos_o, sos_d,
+                   rank_adj_em, pythag FROM kenpom_daily
+            WHERE team=? ORDER BY snapshot_date DESC""", (team,)).fetchall()
+        for r in rows:
+            if str(r[0])[:10] < gd_str: return r[1:]
+        return None
+
+    # TVD
+    th, ta = tvd_snap(home), tvd_snap(away)
+    if th:
+        for i, k in enumerate(['h_tvd_adj_em','h_tvd_adj_o','h_tvd_adj_d','h_tvd_adj_t','h_tvd_barthag','h_tvd_wab']):
+            row[k] = th[i]
+        row['has_tvd_home'] = 1
+    else: row['has_tvd_home'] = 0
+    if ta:
+        for i, k in enumerate(['a_tvd_adj_em','a_tvd_adj_o','a_tvd_adj_d','a_tvd_adj_t','a_tvd_barthag','a_tvd_wab']):
+            row[k] = ta[i]
+        row['has_tvd_away'] = 1
+    else: row['has_tvd_away'] = 0
+    if th and ta:
+        row['tvd_em_gap']  = (th[0] or 0) - (ta[0] or 0)
+        row['tvd_bar_gap'] = (th[4] or 0) - (ta[4] or 0)
+
+    # KPD
+    kh, ka = kpd_snap(home), kpd_snap(away)
+    kpd_keys_h = ['h_kpd_adj_em','h_kpd_adj_o','h_kpd_adj_d','h_kpd_adj_tempo',
+                  'h_kpd_luck','h_kpd_sos','h_kpd_sos_o','h_kpd_sos_d','h_kpd_rank_adj_em','h_kpd_pythag']
+    kpd_keys_a = ['a_kpd_adj_em','a_kpd_adj_o','a_kpd_adj_d','a_kpd_adj_tempo',
+                  'a_kpd_luck','a_kpd_sos','a_kpd_sos_o','a_kpd_sos_d','a_kpd_rank_adj_em','a_kpd_pythag']
+    if kh:
+        for i, k in enumerate(kpd_keys_h): row[k] = kh[i]
+        row['has_kpd_home'] = 1
+    else: row['has_kpd_home'] = 0
+    if ka:
+        for i, k in enumerate(kpd_keys_a): row[k] = ka[i]
+        row['has_kpd_away'] = 1
+    else: row['has_kpd_away'] = 0
+    if kh and ka:
+        row['kpd_em_gap']   = (kh[0] or 0) - (ka[0] or 0)
+        row['kpd_luck_gap'] = (kh[4] or 0) - (ka[4] or 0)
+        row['kpd_sos_gap']  = (kh[5] or 0) - (ka[5] or 0)
+
+    # KP fanmatch
+    fm = conn.execute("""
+        SELECT home_team, home_pred, away_pred, home_wp, pred_tempo FROM kenpom_fanmatch
+        WHERE game_date=? AND ((home_team=? AND away_team=?) OR (home_team=? AND away_team=?))
+        LIMIT 1""", (gd_str, home, away, away, home)).fetchone()
+    if fm:
+        flipped = (fm[0] != home)
+        h_pred = float(fm[2] if flipped else fm[1]) if fm[1] else None
+        a_pred = float(fm[1] if flipped else fm[2]) if fm[2] else None
+        h_wp   = (1 - float(fm[3])/100 if flipped else float(fm[3])/100) if fm[3] else None
+        row.update({'kp_home_pred': h_pred, 'kp_away_pred': a_pred, 'kp_home_wp': h_wp,
+                    'kp_pred_margin': (h_pred - a_pred) if h_pred and a_pred else None,
+                    'kp_pred_tempo': float(fm[4]) if fm[4] else None, 'has_kp_fanmatch': 1})
+    else:
+        row['has_kp_fanmatch'] = 0
+
+    return row, home, away
 
 
-def kelly_size(edge, win_prob, bankroll, kelly_frac=KELLY_FRAC, max_pct=MAX_BET_PCT):
-    """Quarter-Kelly bet sizing."""
-    # Convert edge to estimated win probability
-    # edge = our_line - dk_spread (positive = we like home)
-    # Use empirical win rate from backtest: roughly 54% at edge=3+
-    p = min(0.58, 0.50 + edge * 0.015)  # rough calibration
+def compute_ev(p): return p * (1 + PAYOUT) - 1
+
+def kelly_size(ev, bankroll):
+    p = (ev + 1) / (1 + PAYOUT)
     q = 1 - p
-    b = 100 / 110  # payout at -110
-
-    kelly = (b * p - q) / b
-    fraction = kelly * kelly_frac
-    bet = bankroll * min(fraction, max_pct)
-
-    return max(0, round(bet, 2))
+    b = PAYOUT
+    kelly = max(0, (b * p - q) / b)
+    return round(bankroll * min(kelly * KELLY_FRAC, MAX_BET_PCT), 2)
 
 
-def print_bet_card(bets, target_date=None):
-    today = target_date or date.today()
-    print("\n" + "="*65)
-    print(f"  NCAAB BET CARD — {today.strftime('%A, %B %d %Y')}")
-    print("="*65)
-
+def print_card(bets, target_date, bankroll, ev_thresh):
+    print("\n" + "="*72)
+    print(f"  NCAAB BET CARD — {target_date.strftime('%A, %B %d %Y')}")
+    print(f"  Bankroll: ${bankroll:,.0f} | EV≥{ev_thresh*100:.0f}% | Spreads {SPREAD_LO}-{SPREAD_HI}pt")
+    print("="*72)
     if not bets:
-        print("  No qualifying bets today (edge < threshold or no games).")
-        print("="*65)
+        print("  No qualifying bets today.")
+        print("="*72)
         return
-
-    total_exposure = sum(b['bet_size'] for b in bets)
-    print(f"  Games: {len(bets)} | Total exposure: ${total_exposure:,.0f}")
-    print("-"*65)
-    print(f"  {'MATCHUP':<35} {'SPREAD':>7} {'PROJ':>7} {'EDGE':>6} {'BET':>8}")
-    print("-"*65)
-
-    for b in sorted(bets, key=lambda x: -abs(x['edge'])):
-        side = "HOME" if b['bet_side'] == 'home' else "AWAY"
-        team = b['home_team'] if b['bet_side'] == 'home' else b['away_team']
-        matchup = f"{b['away_team']} @ {b['home_team']}"
-        if len(matchup) > 34: matchup = matchup[:31] + "..."
-
-        spread_str = f"{b['spread']:+.1f}"
-        proj_str   = f"{b['proj_margin']:+.1f}"
-        edge_str   = f"{b['edge']:+.1f}"
-        bet_str    = f"${b['bet_size']:,.0f}"
-        bet_on     = f"{team} ({side})"
-
-        print(f"  {matchup:<35} {spread_str:>7} {proj_str:>7} {edge_str:>6} {bet_str:>8}")
-        print(f"  {'→ BET: ' + bet_on:<50}")
-        print()
-
-    print("="*65)
-    print("  Kelly sizing @ 1/4 Kelly, max 2% bankroll")
-    print("  Exclude spreads 9-12pt (historically poor bucket)")
-    print("="*65)
+    total = sum(b['bet_size'] for b in bets)
+    print(f"  {len(bets)} bet(s) | Total exposure: ${total:,.0f} ({total/bankroll*100:.1f}%)")
+    print(f"\n  {'MATCHUP':<38} {'LINE':>5} {'P':>6} {'EV':>7}  {'BET':<22} {'SIZE':>7}")
+    print("  " + "-"*70)
+    for b in sorted(bets, key=lambda x: -x['ev']):
+        matchup = f"{b['away_norm']} @ {b['home_norm']}"
+        if len(matchup) > 37: matchup = matchup[:34] + "..."
+        side  = 'HOME' if b['bet_side'] == 'home' else 'AWAY'
+        team  = b['home_norm'] if b['bet_side'] == 'home' else b['away_norm']
+        if len(team) > 21: team = team[:18] + "..."
+        fm = " ★" if b.get('has_fanmatch') else "  "
+        print(f"  {matchup:<38} {b['spread']:>+5.1f} {b['p_cover']:>6.3f} {b['ev']:>+7.3f}  {team+' ('+side+')' :<22} ${b['bet_size']:>6,.0f}{fm}")
+    print("  " + "-"*70)
+    print("  ★ KenPom fanmatch available  |  ¼-Kelly sizing, max 2% per game")
+    print("="*72)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--date', type=str, help='Target date YYYY-MM-DD')
+    parser.add_argument('--date',     type=str,   help='YYYY-MM-DD (default: today)')
     parser.add_argument('--bankroll', type=float, default=BANKROLL)
-    parser.add_argument('--edge', type=float, default=EDGE_MIN)
+    parser.add_argument('--ev',       type=float, default=EV_MIN)
+    parser.add_argument('--demo',     action='store_true', help='Use demo games for testing')
     args = parser.parse_args()
 
     target_date = date.fromisoformat(args.date) if args.date else date.today()
-    bankroll = args.bankroll
+    bankroll    = args.bankroll
+    ev_thresh   = args.ev
 
-    print(f"Generating bet card for {target_date}...")
+    print(f"\nNCAAB Daily Bets — {target_date}")
+    print("="*50)
 
-    model, feature_cols = load_model_and_features()
-    if not model:
-        sys.exit(1)
+    model, imputer, feature_cols = load_model()
+    if not model: sys.exit(1)
 
-    odds_data = fetch_todays_lines(target_date)
-    games = parse_lines(odds_data, target_date)
-    print(f"Found {len(games)} games on DraftKings for {target_date}")
+    try:
+        norm_fn = get_norm_func()
+    except Exception as e:
+        print(f"  Warning: could not load norm() from build_features: {e}")
+        norm_fn = lambda x: x
 
+    if args.demo:
+        games = [
+            {'home_team': 'Duke',    'away_team': 'North Carolina', 'spread': -4.5, 'game_time': datetime.now()},
+            {'home_team': 'Kansas',  'away_team': 'Baylor',         'spread': -3.0, 'game_time': datetime.now()},
+            {'home_team': 'Gonzaga', 'away_team': "Saint Mary's",   'spread': -6.5, 'game_time': datetime.now()},
+        ]
+        print(f"  DEMO MODE: {len(games)} games")
+    else:
+        odds_data = fetch_todays_lines(target_date)
+        games = parse_lines(odds_data, target_date)
+        print(f"  DraftKings: {len(games)} games on {target_date}")
+
+    if not games:
+        print("No games found. Use --demo for testing.")
+        sys.exit(0)
+
+    conn = sqlite3.connect(DB)
     bets = []
-    conn = get_db()
-    season = target_date.year if target_date.month >= 9 else target_date.year
 
-    for game in games:
-        row = build_game_features(
-            game['home_team'], game['away_team'],
-            game['spread'], season, conn, feature_cols
-        )
+    print(f"\nScoring {len(games)} game(s)...")
+    print(f"  {'Game':<44} {'P(cvr)':>7} {'EV':>8}  Status")
+    print("  " + "-"*68)
 
-        X = pd.DataFrame([row])[feature_cols]
-        X = X.fillna(0)  # median fill in production
-        proj_margin = float(model.predict(X)[0])
-
-        spread = game['spread']
-        # Edge = how much better our projection is vs the line
-        # Positive edge = home team outperforms line
-        edge = proj_margin - spread
-
-        if abs(edge) < args.edge:
-            continue
+    for g in games:
+        spread = g['spread']
         if not (SPREAD_LO <= abs(spread) <= SPREAD_HI):
             continue
-        if EXCLUDE_LO <= abs(spread) <= EXCLUDE_HI:
+        try:
+            row, hn, an = build_features(g['home_team'], g['away_team'],
+                                         spread, target_date, conn, feature_cols, norm_fn)
+        except Exception as e:
+            print(f"  ERROR {g['home_team']} vs {g['away_team']}: {e}")
             continue
 
-        bet_side = 'home' if edge > 0 else 'away'
-        bet_size = kelly_size(abs(edge), None, bankroll)
+        X    = pd.DataFrame([row])[feature_cols]
+        Ximp = pd.DataFrame(imputer.transform(X), columns=feature_cols)
+        p    = float(model.predict_proba(Ximp)[0][1])
 
-        if bet_size < 10:
-            continue
+        ev_h = compute_ev(p)
+        ev_a = compute_ev(1 - p)
+        best_ev  = max(ev_h, ev_a)
+        bet_side = 'home' if ev_h >= ev_a else 'away'
+        p_disp   = p if bet_side == 'home' else (1 - p)
 
-        bets.append({
-            'home_team': game['home_team'],
-            'away_team': game['away_team'],
-            'spread': spread,
-            'proj_margin': proj_margin,
-            'edge': edge,
-            'bet_side': bet_side,
-            'bet_size': bet_size,
-            'game_time': game['game_time'],
-        })
+        label = f"{an} @ {hn}"
+        if len(label) > 43: label = label[:40] + "..."
+        qualifies = best_ev >= ev_thresh
+        status = f"✓ BET {('HOME' if bet_side=='home' else 'AWAY')}" if qualifies else "—"
+        print(f"  {label:<44} {p_disp:>7.3f} {best_ev:>+8.3f}  {status}")
+
+        if qualifies:
+            sz = kelly_size(best_ev, bankroll)
+            if sz >= 10:
+                bets.append({
+                    'home_team': g['home_team'], 'away_team': g['away_team'],
+                    'home_norm': hn, 'away_norm': an,
+                    'bet_norm':  hn if bet_side=='home' else an,
+                    'spread': spread, 'p_cover': p_disp, 'ev': best_ev,
+                    'bet_side': bet_side, 'bet_size': sz,
+                    'game_time': str(g['game_time']),
+                    'has_fanmatch': bool(row.get('has_kp_fanmatch')),
+                })
 
     conn.close()
-    print_bet_card(bets, target_date)
+    print_card(bets, target_date, bankroll, ev_thresh)
 
-    # Save
     if bets:
-        out_path = os.path.join(OUT, f'bets_{target_date}.json')
-        with open(out_path, 'w') as f:
+        out = os.path.join(OUT_DIR, f'bets_{target_date}.json')
+        with open(out, 'w') as f:
             json.dump(bets, f, indent=2, default=str)
-        print(f"\nBets saved: {out_path}")
+        print(f"\nSaved: {out}")
