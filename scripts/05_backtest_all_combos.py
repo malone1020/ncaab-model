@@ -71,7 +71,26 @@ FEATURE_GROUPS = {
         'ha_3par_matchup_h','ha_3par_matchup_a',
         'ha_prox_matchup_h','ha_prox_matchup_a',
     ],
-    # ── Clean (no leakage) new sources ──────────────────────────────────────
+    # ── NEW CLEAN SOURCES ────────────────────────────────────────────────────
+    'TRAVEL': [
+        'away_travel_miles', 'tz_crossings', 'east_to_west', 'west_to_east',
+        'away_road_game_n', 'away_long_trip', 'away_tz_change',
+        'neutral_home_miles',
+    ],
+    'REFS': [
+        'ref_avg_fpg', 'ref_home_bias', 'ref_ftr_home_avg',
+        'ref_ftr_away_avg', 'ref_ftr_gap', 'has_ref_data',
+        'ref_high_foul', 'ref_low_foul',
+    ],
+    'RECENCY': [
+        'h_rew_adj_em', 'h_rew_adj_o', 'h_rew_adj_d',
+        'a_rew_adj_em', 'a_rew_adj_o', 'a_rew_adj_d',
+        'h_trend_adj_em', 'a_trend_adj_em',
+        'rew_em_gap', 'rew_o_gap', 'rew_d_gap', 'trend_em_gap', 'has_rew',
+    ],
+    'EXPERIENCE': [
+        'h_experience', 'a_experience', 'exp_gap', 'has_experience',
+    ],
     'KPD': [
         'h_kpd_adj_em','h_kpd_adj_o','h_kpd_adj_d','h_kpd_adj_tempo','h_kpd_luck',
         'h_kpd_sos','h_kpd_sos_o','h_kpd_sos_d','h_kpd_rank_adj_em','h_kpd_pythag',
@@ -96,7 +115,7 @@ FEATURE_GROUPS = {
 }
 
 # Clean sources (no look-ahead leakage) — use for primary backtest
-CLEAN_SOURCES   = ['TVD','KPD','KP_FANMATCH','ROLLING']
+CLEAN_SOURCES   = ['TVD','KPD','KP_FANMATCH','ROLLING','TRAVEL','REFS','RECENCY','EXPERIENCE']
 # Leaky sources (season-final ratings) — kept for reference only
 LEAKY_SOURCES   = ['TVS','KP','HA_CORE','HA_SHOT','HA_DELTA','HA_MATCHUP']
 # Test all clean combos + optionally leaky for comparison

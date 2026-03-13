@@ -815,6 +815,84 @@ def load_rolling(conn):
         print(f"  Rolling efficiency WARNING: {e}")
         return {}
 
+def load_travel(conn):
+    """Load precomputed travel distance + timezone features."""
+    try:
+        df = pd.read_sql("SELECT * FROM team_travel", conn)
+        if df.empty:
+            print("  ⚠️  team_travel empty — run 03f_compute_travel.py")
+            return {}
+        idx = {}
+        for _, r in df.iterrows():
+            idx[(r['game_date'], r['home_team'], r['away_team'])] = r.to_dict()
+        print(f"  travel: {len(idx):,} games")
+        return idx
+    except Exception as e:
+        print(f"  ⚠️  team_travel not available: {e}")
+        return {}
+
+
+def load_referee_profiles(conn):
+    """Load referee profiles keyed by (ref_id, season)."""
+    try:
+        ref_games = pd.read_sql("SELECT * FROM referee_game", conn)
+        profiles  = pd.read_sql("SELECT * FROM referee_profiles", conn)
+        if ref_games.empty:
+            print("  ⚠️  referee_game empty — run 03e_pull_referees.py")
+            return {}, {}
+
+        # Index referee assignments by (game_date, home_team, away_team)
+        rg_idx = {}
+        for _, r in ref_games.iterrows():
+            key = (r['game_date'], r.get('home_team',''), r.get('away_team',''))
+            rg_idx[key] = r.to_dict()
+
+        # Index profiles by (ref_id, season) — use season-1 to be safe
+        prof_idx = {}
+        for _, r in profiles.iterrows():
+            prof_idx[(str(r['ref_id']), int(r['season']))] = r.to_dict()
+
+        print(f"  referees: {len(rg_idx):,} game assignments, {len(prof_idx):,} profiles")
+        return rg_idx, prof_idx
+    except Exception as e:
+        print(f"  ⚠️  referee data not available: {e}")
+        return {}, {}
+
+
+def load_recency_eff(conn):
+    """Load recency-weighted efficiency by (game_date, team)."""
+    try:
+        df = pd.read_sql("SELECT * FROM recency_eff", conn)
+        if df.empty:
+            print("  ⚠️  recency_eff empty — run 03g_recency_features.py")
+            return {}
+        idx = {}
+        for _, r in df.iterrows():
+            idx[(r['game_date'], r['team'])] = r.to_dict()
+        print(f"  recency_eff: {len(idx):,} rows")
+        return idx
+    except Exception as e:
+        print(f"  ⚠️  recency_eff not available: {e}")
+        return {}
+
+
+def load_experience(conn):
+    """Load team experience by (season, team)."""
+    try:
+        df = pd.read_sql("SELECT * FROM team_experience", conn)
+        if df.empty:
+            print("  ⚠️  team_experience empty — run 03g_recency_features.py")
+            return {}
+        idx = {}
+        for _, r in df.iterrows():
+            idx[(int(r['season']), r['team'])] = float(r['experience']) if r['experience'] else None
+        print(f"  experience: {len(idx):,} team-seasons")
+        return idx
+    except Exception as e:
+        print(f"  ⚠️  team_experience not available: {e}")
+        return {}
+
+
 def build_features():
     conn = db()
     print("Loading data sources...")
@@ -830,6 +908,12 @@ def build_features():
     kpd      = load_kenpom_daily(conn)
     kp_fm    = load_kenpom_fanmatch(conn)
     rolling  = load_rolling(conn)
+
+    # ── NEW SOURCES ───────────────────────────────────────────────────────────
+    travel      = load_travel(conn)
+    ref_games, ref_profiles = load_referee_profiles(conn)
+    recency_eff = load_recency_eff(conn)
+    experience  = load_experience(conn)
 
     print("Computing derived data...")
     hca      = build_hca(games)
@@ -1101,6 +1185,78 @@ def build_features():
             except: r['line_move'] = None
         else:
             r['line_move'] = None
+
+        # ── Travel distance + timezone ──────────────────────────────────────────
+        gd_str_raw = str(gd.date())
+        # Try both norm'd and raw home/away for travel lookup
+        trav = travel.get((gd_str_raw, g['home_team'], g['away_team'])) or \
+               travel.get((gd_str_raw, home, away)) or {}
+        r['away_travel_miles']    = trav.get('away_travel_miles')
+        r['tz_crossings']         = trav.get('tz_crossings')
+        r['east_to_west']         = trav.get('east_to_west')
+        r['west_to_east']         = trav.get('west_to_east')
+        r['away_road_game_n']     = trav.get('away_road_game_n')
+        r['neutral_home_miles']   = trav.get('neutral_site_home_miles')
+        # Derived flags
+        r['away_long_trip']       = int((r['away_travel_miles'] or 0) >= 1000)
+        r['away_tz_change']       = int((r['tz_crossings'] or 0) >= 2)
+
+        # ── Referee features ────────────────────────────────────────────────────
+        ref_info = ref_games.get((gd_str_raw, g['home_team'], g['away_team'])) or \
+                   ref_games.get((gd_str_raw, home, away)) or {}
+        # Aggregate stats across all 3 refs assigned to the game
+        ref_fpg_vals, ref_bias_vals, ref_ftr_h_vals, ref_ftr_a_vals = [], [], [], []
+        for rk in ['ref1_id','ref2_id','ref3_id']:
+            rid = str(ref_info.get(rk,''))
+            if not rid or rid in ('', 'None', 'nan'):
+                continue
+            # Use prior season profile to avoid leakage
+            prof = ref_profiles.get((rid, s-1)) or ref_profiles.get((rid, s)) or {}
+            if prof.get('avg_fouls_per_game') is not None:
+                ref_fpg_vals.append(prof['avg_fouls_per_game'])
+            if prof.get('home_foul_bias') is not None:
+                ref_bias_vals.append(prof['home_foul_bias'])
+            if prof.get('ftr_home_avg') is not None:
+                ref_ftr_h_vals.append(prof['ftr_home_avg'])
+            if prof.get('ftr_away_avg') is not None:
+                ref_ftr_a_vals.append(prof['ftr_away_avg'])
+
+        r['ref_avg_fpg']        = float(np.mean(ref_fpg_vals))   if ref_fpg_vals   else None
+        r['ref_home_bias']      = float(np.mean(ref_bias_vals))  if ref_bias_vals  else None
+        r['ref_ftr_home_avg']   = float(np.mean(ref_ftr_h_vals)) if ref_ftr_h_vals else None
+        r['ref_ftr_away_avg']   = float(np.mean(ref_ftr_a_vals)) if ref_ftr_a_vals else None
+        r['ref_ftr_gap']        = gap(r['ref_ftr_home_avg'], r['ref_ftr_away_avg'])
+        r['has_ref_data']       = int(bool(ref_fpg_vals))
+
+        # High/low foul environment flags
+        r['ref_high_foul']      = int((r['ref_avg_fpg'] or 0) >= 42)
+        r['ref_low_foul']       = int(0 < (r['ref_avg_fpg'] or 0) < 33)
+
+        # ── Recency-weighted efficiency (trend direction) ───────────────────────
+        for side, team in [('h', home), ('a', away)]:
+            gd_str2 = str(gd.date())
+            rew = recency_eff.get((gd_str2, team)) or {}
+            r[f'{side}_rew_adj_em']   = rew.get('rew_adj_em')
+            r[f'{side}_rew_adj_o']    = rew.get('rew_adj_o')
+            r[f'{side}_rew_adj_d']    = rew.get('rew_adj_d')
+            r[f'{side}_trend_adj_em'] = rew.get('trend_adj_em')
+            r[f'{side}_trend_adj_o']  = rew.get('trend_adj_o')
+            r[f'{side}_trend_adj_d']  = rew.get('trend_adj_d')
+
+        r['rew_em_gap']      = gap(r.get('h_rew_adj_em'),   r.get('a_rew_adj_em'))
+        r['rew_o_gap']       = gap(r.get('h_rew_adj_o'),    r.get('a_rew_adj_o'))
+        r['rew_d_gap']       = gap(r.get('h_rew_adj_d'),    r.get('a_rew_adj_d'))
+        r['trend_em_gap']    = gap(r.get('h_trend_adj_em'), r.get('a_trend_adj_em'))
+        r['has_rew']         = int(r.get('h_rew_adj_em') is not None)
+
+        # ── Experience ──────────────────────────────────────────────────────────
+        # Use prior season experience — no leakage
+        h_exp = experience.get((s-1, home)) or experience.get((s, home))
+        a_exp = experience.get((s-1, away)) or experience.get((s, away))
+        r['h_experience']   = h_exp
+        r['a_experience']   = a_exp
+        r['exp_gap']        = gap(h_exp, a_exp)
+        r['has_experience'] = int(h_exp is not None and a_exp is not None)
 
         rows.append(r)
 
