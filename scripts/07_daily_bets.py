@@ -122,14 +122,15 @@ def build_features(home_raw, away_raw, spread, target_date, conn, feature_cols, 
 
     def tvd_snap(team):
         rows = conn.execute("""
-            SELECT adj_em, adj_o, adj_d, adj_t, barthag, wab FROM torvik_daily
+            SELECT snapshot_date, adj_em, adj_o, adj_d, barthag,
+                   efg_o, efg_d, tov_o, tov_d, orb, drb, ftr_o, ftr_d,
+                   two_p_o, two_p_d, three_p_o, three_p_d, blk_pct, ast_pct
+            FROM torvik_daily
             WHERE team=? ORDER BY snapshot_date DESC""", (team,)).fetchall()
         for r in rows:
-            sd = conn.execute("SELECT snapshot_date FROM torvik_daily WHERE team=? AND adj_em=? LIMIT 1",
-                              (team, r[0])).fetchone()
-            snap = str(sd[0]) if sd else ''
+            snap = str(r[0])
             if len(snap) == 8: snap = f"{snap[:4]}-{snap[4:6]}-{snap[6:8]}"
-            if snap[:10] < gd_str: return r
+            if snap[:10] < gd_str: return r[1:]  # strip snapshot_date
         return None
 
     def kpd_snap(team):
@@ -144,18 +145,18 @@ def build_features(home_raw, away_raw, spread, target_date, conn, feature_cols, 
     # TVD
     th, ta = tvd_snap(home), tvd_snap(away)
     if th:
-        for i, k in enumerate(['h_tvd_adj_em','h_tvd_adj_o','h_tvd_adj_d','h_tvd_adj_t','h_tvd_barthag','h_tvd_wab']):
+        for i, k in enumerate(['h_tvd_adj_em','h_tvd_adj_o','h_tvd_adj_d','h_tvd_barthag']):
             row[k] = th[i]
         row['has_tvd_home'] = 1
     else: row['has_tvd_home'] = 0
     if ta:
-        for i, k in enumerate(['a_tvd_adj_em','a_tvd_adj_o','a_tvd_adj_d','a_tvd_adj_t','a_tvd_barthag','a_tvd_wab']):
+        for i, k in enumerate(['a_tvd_adj_em','a_tvd_adj_o','a_tvd_adj_d','a_tvd_barthag']):
             row[k] = ta[i]
         row['has_tvd_away'] = 1
     else: row['has_tvd_away'] = 0
     if th and ta:
         row['tvd_em_gap']  = (th[0] or 0) - (ta[0] or 0)
-        row['tvd_bar_gap'] = (th[4] or 0) - (ta[4] or 0)
+        row['tvd_bar_gap'] = (th[3] or 0) - (ta[3] or 0)
 
     # KPD
     kh, ka = kpd_snap(home), kpd_snap(away)
