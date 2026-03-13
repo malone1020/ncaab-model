@@ -60,14 +60,56 @@ def load_model():
     return model, imputer, features
 
 
+# OddsAPI uses full names like "Tennessee Volunteers" — strip nicknames to match Torvik
+ODDS_NICKNAMES = {
+    'Volunteers','Commodores','Boilermakers','Cyclones','Cavaliers',
+    'Golden Flashes','Golden Hurricane','Mean Green','Blue Devils','Tigers',
+    'Tar Heels','Jayhawks','Cougars','Rebels','Crimson Tide','Razorbacks',
+    'Sooners','Longhorns','Aggies','Bulldogs','Huskies','Hoyas','Red Storm',
+    'Pirates','Spartans','Bruins','Wolverines','Badgers','Cornhuskers',
+    'Hawkeyes','Illini','Gophers','Wildcats','Nittany Lions','Terrapins',
+    'Scarlet Knights','Bears','Horned Frogs','Red Raiders','Cowboys',
+    'Mountaineers','Bearcats','Knights','Panthers','Seminoles','Hurricanes',
+    'Yellow Jackets','Demon Deacons','Orange','Eagles','Lions','Owls','Rams',
+    'Spiders','Flyers','Billikens','Dukes','Colonials','Retrievers',
+    'Catamounts','Crimson','Quakers','Big Red','Aztecs','Lobos','Wolf Pack',
+    'Falcons','Thunderbirds','Utes','Buffaloes','Sun Devils','Ducks',
+    'Beavers','Trojans','Golden Bears','Cardinal','Gaels','Zags','Pilots',
+    'Waves','Flames','Anteaters','Matadors','Titans','Lancers','Gauchos',
+    'Tritons','Highlanders','Jaguars','Bison','Golden Eagles','Red Foxes',
+    'Friars','Musketeers','Hilltoppers','Monarchs','Rattlers',
+    'Rainbow Warriors','Broncos','Lumberjacks','Warhawks','Penguins','Zips',
+    'Rockets','Chippewas','Cardinals','Redhawks','Ospreys','Hatters',
+    'Mavericks','Roadrunners','Miners','Racers','Govs','Grizzlies',
+    'Kangaroos','Jackrabbits','Coyotes','Lopes','Chargers','Ramblers',
+    'Braves','Sycamores','Leathernecks','Redbirds','Salukis','Shockers',
+    'Bluejays','Blue Jays','Privateers','Hokies','Retrievers','Penmen',
+    'Seawolves','Runnin Utes','Fighting Hawks','Golden Grizzlies',
+}
+
 def get_norm_func():
-    """Load norm() from 04_build_features.py so team name normalization is shared."""
+    """Load norm() from 04_build_features.py, wrapped to strip OddsAPI nicknames."""
     import importlib.util
     path = os.path.join(ROOT, 'scripts', '04_build_features.py')
     spec = importlib.util.spec_from_file_location("bfm", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return mod.norm
+    base_norm = mod.norm
+
+    def odds_norm(name):
+        # Strip trailing nickname: "Tennessee Volunteers" -> "Tennessee"
+        parts = name.rsplit(' ', 1)
+        if len(parts) == 2 and parts[1] in ODDS_NICKNAMES:
+            name = parts[0]
+        # Also handle two-word nicknames: "Golden Flashes", "Mean Green", etc.
+        parts3 = name.rsplit(' ', 2)
+        if len(parts3) == 3:
+            two_word = parts3[1] + ' ' + parts3[2]
+            if two_word in ODDS_NICKNAMES:
+                name = parts3[0]
+        return base_norm(name)
+
+    return odds_norm
 
 
 def fetch_todays_lines(target_date):
