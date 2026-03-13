@@ -168,15 +168,17 @@ def walk_forward_validate(df, features, target='went_over'):
         if len(train_df) < MIN_TRAIN:
             continue
 
-        X_train = train_df[features]
+        # Drop features that are entirely NaN in this training fold
+        valid_feats = [f for f in features if train_df[f].notna().any()]
+        X_train = train_df[valid_feats]
         y_train = train_df[target].astype(int)
-        X_test  = test_df[features]
+        X_test  = test_df[valid_feats]
         y_test  = test_df[target].astype(int)
 
         # Impute
         imp = SimpleImputer(strategy='median')
-        X_train_imp = pd.DataFrame(imp.fit_transform(X_train), columns=features)
-        X_test_imp  = pd.DataFrame(imp.transform(X_test),  columns=features)
+        X_train_imp = pd.DataFrame(imp.fit_transform(X_train), columns=valid_feats)
+        X_test_imp  = pd.DataFrame(imp.transform(X_test),  columns=valid_feats)
 
         # Train calibrated XGBClassifier
         base = XGBClassifier(
@@ -249,6 +251,13 @@ def train_production_model(df, features, target='went_over'):
     print("\nTraining production totals model on full dataset...")
     labeled = df[df['over_under'].notna() & df[target].notna()].copy()
     print(f"  Training on {len(labeled):,} games, {len(features)} features")
+
+    # Drop features that are entirely NaN across the full dataset
+    valid_feats = [f for f in features if labeled[f].notna().any()]
+    if len(valid_feats) < len(features):
+        dropped = set(features) - set(valid_feats)
+        print(f"  Dropped {len(dropped)} all-NaN features: {dropped}")
+    features = valid_feats
 
     X = labeled[features]
     y = labeled[target].astype(int)
