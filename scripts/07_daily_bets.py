@@ -424,6 +424,11 @@ if __name__ == '__main__':
     for g in games:
         spread = g['spread']
         if not (SPREAD_LO <= abs(spread) <= SPREAD_HI):
+            hn_raw = norm_fn(g['home_team'])
+            an_raw = norm_fn(g['away_team'])
+            label  = f"{an_raw} @ {hn_raw}"
+            if len(label) > 44: label = label[:41] + "..."
+            print(f"  {label:<44} {'—':>7} {'—':>7} {'—':>8}  SKIP (spread {spread:+.1f} outside {SPREAD_LO}-{SPREAD_HI}pt range)")
             continue
         try:
             row, hn, an = build_features(g['home_team'], g['away_team'],
