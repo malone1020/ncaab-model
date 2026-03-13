@@ -174,9 +174,10 @@ def parse_lines(odds_data, target_date):
 def fetch_torvik_schedule(target_date):
     """
     Fetch today's schedule from Torvik to get conf_game and neutral_site flags.
-    Returns dict keyed by frozenset of normalized team names:
-      {frozenset({'Arizona','Iowa St.'}): {'conf_game': 1, 'neutral': 0}, ...}
+    Torvik cell format: "3 Arizona vs 7 Iowa St. B12-T ESPN"
+    Returns dict keyed by frozenset of normalized team names.
     """
+    import re
     url = f"https://barttorvik.com/schedule.php?date={target_date.strftime('%Y%m%d')}"
     try:
         r = requests.get(url, timeout=10)
@@ -197,20 +198,42 @@ def fetch_torvik_schedule(target_date):
                 if tag == 'td':
                     self._in_td = False
                     self._row.append(''.join(self._cells).strip())
-                if tag == 'tr' and len(self._row) >= 3:
-                    # Row format: Time | Matchup (team1 vs team2) | conf | ...
-                    matchup_cell = self._row[1] if len(self._row) > 1 else ''
-                    conf_cell    = self._row[2] if len(self._row) > 2 else ''
-                    if ' vs ' in matchup_cell:
-                        parts = matchup_cell.split(' vs ')
-                        # Strip rank numbers from team names
-                        import re
-                        t1 = re.sub(r'^\d+\s+', '', parts[0]).strip()
-                        t2 = re.sub(r'^\d+\s+', '', parts[1]).strip()
-                        is_conf = 1 if conf_cell and conf_cell not in ('', 'Non') and '-' in conf_cell else 0
-                        is_neutral = 1 if '-T' in conf_cell or '-N' in conf_cell else 0
-                        key = frozenset([t1, t2])
-                        self.games[key] = {'conf_game': is_conf, 'neutral_site': is_neutral}
+                if tag == 'tr' and self._row:
+                    # Find the cell containing ' vs ' — matchup + conf are in same cell
+                    # Format: "3 Arizona vs 7 Iowa St. B12-T ESPN"
+                    for cell in self._row:
+                        if ' vs ' not in cell:
+                            continue
+                        # Split on ' vs '
+                        parts = cell.split(' vs ', 1)
+                        left  = parts[0].strip()   # "3 Arizona"
+                        right = parts[1].strip()   # "7 Iowa St. B12-T ESPN"
+                        # Strip leading rank number from left team
+                        t1 = re.sub(r'^\d+\s+', '', left).strip()
+                        # Right side has: rank, team name, conf code, network
+                        # Conf code looks like B12-T, SEC-T, ACC-T, B10-T, Non-con etc.
+                        # Match pattern: optional rank, team name, then CONF-SUFFIX
+                        right_no_rank = re.sub(r'^\d+\s+', '', right)
+                        # Extract conf code (all-caps with hyphen, e.g. B12-T, SEC-T)
+                        conf_match = re.search(r'([A-Z][A-Z0-9]*-[A-Z])', right_no_rank)
+                        conf_code = conf_match.group(1) if conf_match else ''
+                        # Strip conf code and anything after from team name
+                        if conf_code:
+                            t2 = right_no_rank[:right_no_rank.index(conf_code)].strip()
+                        else:
+                            # No conf code — strip trailing network name (all caps)
+                            t2 = re.sub(r'\s+[A-Z0-9]+\s*$', '', right_no_rank).strip()
+                        # Determine conf_game and neutral_site from conf code
+                        is_conf    = 1 if conf_code and 'Non' not in conf_code else 0
+                        is_neutral = 1 if conf_code.endswith('-T') or conf_code.endswith('-N') else 0
+                        if t1 and t2:
+                            key = frozenset([t1, t2])
+                            self.games[key] = {
+                                'conf_game':    is_conf,
+                                'neutral_site': is_neutral,
+                                'conf_code':    conf_code,
+                            }
+                        break
             def handle_data(self, data):
                 if self._in_td: self._cells.append(data)
 
