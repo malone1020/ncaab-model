@@ -267,6 +267,9 @@ def store_line_movement(games, target_date, conn, norm_fn):
 
     conn.commit()
     return stored
+
+
+def fetch_torvik_schedule(target_date):
     """
     Fetch today's schedule from Torvik to get conf_game and neutral_site flags.
     Torvik cell format: "3 Arizona vs 7 Iowa St. B12-T ESPN"
@@ -338,6 +341,122 @@ def store_line_movement(games, target_date, conn, norm_fn):
     except Exception as e:
         print(f"  Warning: could not fetch Torvik schedule: {e}")
         return {}
+
+
+def fetch_todays_refs(games, target_date, norm_fn):
+    """
+    Fetch referee assignments for today's games from ESPN's summary API.
+    Gets ESPN event IDs from scoreboard, then hits each summary for officials.
+    Stores in referee_game and updates referee_profiles incrementally.
+    """
+    ESPN_SCOREBOARD = ("https://site.api.espn.com/apis/site/v2/sports/basketball/"
+                       "mens-college-basketball/scoreboard")
+    ESPN_SUMMARY    = ("https://site.api.espn.com/apis/site/v2/sports/basketball/"
+                       "mens-college-basketball/summary?event={eid}")
+    HEADERS = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json',
+    }
+
+    def strip_nick(name):
+        parts = name.rsplit(' ', 1)
+        if len(parts) == 2 and parts[1] in ODDS_NICKNAMES:
+            name = parts[0]
+        parts3 = name.rsplit(' ', 2)
+        if len(parts3) == 3:
+            two = parts3[1] + ' ' + parts3[2]
+            if two in ODDS_NICKNAMES:
+                name = parts3[0]
+        return name.strip()
+
+    try:
+        # Step 1: get today's ESPN event IDs
+        date_str = target_date.strftime('%Y%m%d')
+        r = requests.get(ESPN_SCOREBOARD,
+                         params={'dates': date_str, 'limit': 300},
+                         headers=HEADERS, timeout=15)
+        if r.status_code != 200:
+            return 0
+
+        espn_map = {}
+        for event in r.json().get('events', []):
+            eid  = str(event.get('id', ''))
+            comp = (event.get('competitions') or [{}])[0]
+            competitors = comp.get('competitors', [])
+            home_obj = next((c for c in competitors if c.get('homeAway') == 'home'), None)
+            away_obj = next((c for c in competitors if c.get('homeAway') == 'away'), None)
+            if home_obj and away_obj and eid:
+                h = norm_fn(strip_nick(home_obj.get('team', {}).get('displayName', '')))
+                a = norm_fn(strip_nick(away_obj.get('team', {}).get('displayName', '')))
+                espn_map[(h, a)] = eid
+                espn_map[(a, h)] = eid
+
+        conn  = sqlite3.connect(DB)
+        now   = datetime.now(timezone.utc).isoformat()
+        date_db = str(target_date)
+        scraped = 0
+
+        for g in games:
+            h_norm = norm_fn(g['home_team'])
+            a_norm = norm_fn(g['away_team'])
+            eid = espn_map.get((h_norm, a_norm))
+            if not eid:
+                continue
+            try:
+                rs = requests.get(ESPN_SUMMARY.format(eid=eid),
+                                  headers=HEADERS, timeout=15)
+                if rs.status_code != 200:
+                    continue
+                data = rs.json()
+
+                # Officials
+                officials = data.get('gameInfo', {}).get('officials', [])
+                refs = [(o.get('fullName') or o.get('displayName', '')).strip()
+                        for o in officials[:3]]
+                while len(refs) < 3:
+                    refs.append(None)
+                ref_1, ref_2, ref_3 = [r if r else None for r in refs]
+
+                # Box score fouls
+                hf = af = ht = at = hg = ag = None
+                for td in data.get('boxscore', {}).get('teams', []):
+                    side = 'home' if td.get('homeAway') == 'home' else 'away'
+                    for stat in td.get('statistics', []):
+                        sn = stat.get('name', '').lower()
+                        try: val = float(stat.get('displayValue', ''))
+                        except: continue
+                        if 'foul' in sn:
+                            if side == 'home': hf = val
+                            else:              af = val
+                        elif sn in ('freethrowsattempted', 'fta'):
+                            if side == 'home': ht = val
+                            else:              at = val
+                        elif sn in ('fieldgoalsattempted', 'fga'):
+                            if side == 'home': hg = val
+                            else:              ag = val
+
+                conn.execute("""
+                    INSERT OR REPLACE INTO referee_game
+                    (game_date, home_team, away_team,
+                     ref_1, ref_2, ref_3,
+                     home_fouls, away_fouls,
+                     home_fta, away_fta, home_fga, away_fga,
+                     scraped_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (date_db, h_norm, a_norm,
+                      ref_1, ref_2, ref_3,
+                      hf, af, ht, at, hg, ag, now))
+                scraped += 1
+                time.sleep(0.3)
+            except Exception:
+                continue
+
+        conn.commit()
+        conn.close()
+        return scraped
+
+    except Exception as e:
+        return 0
 
 
 def build_features(home_raw, away_raw, spread, target_date, conn, feature_cols, norm_fn, schedule_info=None):
@@ -823,6 +942,11 @@ if __name__ == '__main__':
             n_stored = store_line_movement(games, target_date, lm_conn, norm_fn)
             lm_conn.close()
             print(f"  Line movement: {n_stored} games logged")
+
+        # Fetch today's referee assignments from ESPN
+        n_refs = fetch_todays_refs(games, target_date, norm_fn)
+        if n_refs > 0:
+            print(f"  Refs: {n_refs} games scraped")
 
     if not games:
         print("No games found. Use --demo for testing.")
