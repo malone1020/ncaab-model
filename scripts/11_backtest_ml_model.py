@@ -255,7 +255,7 @@ if __name__ == '__main__':
         summary = {
             'n_bets': n, 'win_rate': round(wr,4), 'roi': round(roi,4),
             'avg_ev': round(avg_ev,4), 'sigma': sigma,
-            'ml_filter': f"{ML_MIN} to +{ML_MAX}",
+            'ml_filter': f"big favs ({ML_FAV_MIN} to {ML_FAV_MAX}) + dogs (+{ML_DOG_MIN} to +{ML_DOG_MAX})",
             'ev_threshold': EV_MIN,
         }
         with open(out, 'w') as f:
