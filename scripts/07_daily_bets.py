@@ -484,30 +484,52 @@ def format_bet_line(b):
 
 
 def print_card(bets, target_date, bankroll, ev_thresh):
-    print("\n" + "="*78)
+    print("\n" + "="*90)
     print(f"  NCAAB BET CARD — {target_date.strftime('%A, %B %d %Y')}")
     print(f"  Bankroll: ${bankroll:,.0f} | EV≥{ev_thresh*100:.0f}%")
-    print("="*78)
+    print("="*90)
     if not bets:
         print("  No qualifying bets today.")
-        print("="*78)
+        print("="*90)
         return
     total_risk = sum(b['bet_size'] for b in bets)
     print(f"  {len(bets)} bet(s) | Total at risk: ${total_risk:,.0f} ({total_risk/bankroll*100:.1f}%)")
-    print(f"\n  {'MATCHUP':<32} {'TYPE':<8} {'LINE':>7} {'P(W)':>6} {'EDGE':>6} {'EV':>7}  {'BET ON':<24} {'SIZE':>7}")
-    print("  " + "-"*82)
-    for b in sorted(bets, key=lambda x: -x['ev']):
+
+    # Sort by game time first, then by EV descending within same game
+    def sort_key(b):
+        try:
+            gt = str(b.get('game_time', ''))
+            return (gt[:19], -b['ev'])  # truncate to second for stable sort
+        except Exception:
+            return ('', -b['ev'])
+
+    print(f"\n  {'TIME':<8} {'MATCHUP':<30} {'TYPE':<8} {'LINE':>7} {'P(W)':>6} {'EDGE':>6} {'EV':>7}  {'BET ON':<24} {'SIZE':>7}")
+    print("  " + "-"*94)
+    for b in sorted(bets, key=sort_key):
         matchup = f"{b['away_norm']} @ {b['home_norm']}"
-        if len(matchup) > 31: matchup = matchup[:28] + "..."
+        if len(matchup) > 29: matchup = matchup[:26] + "..."
         btype = b.get('bet_type', 'SPREAD').upper()
         line_short, bet_desc = format_bet_line(b)
         if len(bet_desc) > 23: bet_desc = bet_desc[:20] + "..."
         fm = " ★" if b.get('has_fanmatch') else "  "
         edge = b.get('edge_pts', 0)
-        print(f"  {matchup:<32} {btype:<8} {line_short:>7} {b['p_cover']:>6.3f} {edge:>+5.1f}% {b['ev']:>+7.3f}  {bet_desc:<24} ${b['bet_size']:>6,.0f}{fm}")
-    print("  " + "-"*82)
+        # Format game time as HH:MM ET
+        try:
+            from zoneinfo import ZoneInfo
+            gt_raw = str(b.get('game_time', ''))
+            gt_dt  = datetime.fromisoformat(gt_raw)
+            if gt_dt.tzinfo is not None:
+                et = gt_dt.astimezone(ZoneInfo('America/New_York'))
+                time_str = et.strftime('%I:%M%p').lstrip('0')
+            else:
+                time_str = gt_raw[11:16]
+        except Exception:
+            time_str = '?'
+        print(f"  {time_str:<8} {matchup:<30} {btype:<8} {line_short:>7} {b['p_cover']:>6.3f} "
+              f"{edge:>+5.1f}% {b['ev']:>+7.3f}  {bet_desc:<24} ${b['bet_size']:>6,.0f}{fm}")
+    print("  " + "-"*94)
     print("  ★ KenPom fanmatch  |  EDGE = P(win) − 52.38% breakeven  |  ¼-Kelly, max 2%")
-    print("="*82)
+    print("="*94)
 
 
 if __name__ == '__main__':
