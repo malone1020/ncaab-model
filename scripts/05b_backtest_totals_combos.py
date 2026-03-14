@@ -42,6 +42,7 @@ CONTEXT_FEATURES = [
     'neutral_site', 'conf_game',
     'home_rest', 'away_rest', 'home_b2b', 'away_b2b',
     'over_under',   # the line itself is a feature — market's best guess at total
+    'is_conf_tournament', 'is_ncaa_tournament',  # tournament type flags
 ]
 
 FEATURE_GROUPS = {

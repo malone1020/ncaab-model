@@ -470,9 +470,21 @@ def build_features(home_raw, away_raw, spread, target_date, conn, feature_cols, 
     sched_data = (schedule_info or {}).get(sched_key, {})
     conf_game_val    = sched_data.get('conf_game', 0)
     neutral_site_val = sched_data.get('neutral_site', 0)
+    conf_code        = sched_data.get('conf_code', '')
+    # Tournament flags — conf tournaments end with -T in Torvik conf code
+    # NCAA tournament games are neutral site, non-conf, in March/April
+    is_conf_tourn = int(bool(conf_code and conf_code.endswith('-T')))
+    is_ncaa_tourn = int(
+        neutral_site_val == 1 and
+        conf_game_val == 0 and
+        target_date.month in (3, 4) and
+        not is_conf_tourn
+    )
     row.update({'neutral_site': neutral_site_val, 'conf_game': conf_game_val, 'spread': spread,
                 'hca_adj': 3.2, 'rest_diff': 0, 'home_rest': 4, 'away_rest': 4,
-                'home_b2b': 0, 'away_b2b': 0})
+                'home_b2b': 0, 'away_b2b': 0,
+                'is_conf_tournament': is_conf_tourn,
+                'is_ncaa_tournament': is_ncaa_tourn})
 
     def tvd_snap(team):
         rows = conn.execute("""

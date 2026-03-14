@@ -558,12 +558,13 @@ def load_haslametrics(conn):
 def load_games(conn):
     df = pd.read_sql("""
         SELECT id, season, game_date, home_team, away_team,
-       home_score, away_score,
-       CAST(neutral_site AS INTEGER) as neutral_site,
-       CAST(conf_game AS INTEGER) as conf_game,
-       (home_score - away_score) as actual_margin
-FROM games
-WHERE home_score IS NOT NULL AND away_score IS NOT NULL
+               home_score, away_score,
+               CAST(neutral_site AS INTEGER) as neutral_site,
+               CAST(conf_game AS INTEGER) as conf_game,
+               COALESCE(tournament, '') as tournament,
+               (home_score - away_score) as actual_margin
+        FROM games
+        WHERE home_score IS NOT NULL AND away_score IS NOT NULL
     """, conn)
     df['home_team'] = df['home_team'].apply(norm)
     df['away_team'] = df['away_team'].apply(norm)
@@ -957,6 +958,8 @@ def build_features():
             'actual_total': actual_total,
             'neutral_site': int(bool(g.get('neutral_site',0))),
             'conf_game': int(bool(g.get('conf_game',0))),
+            'is_conf_tournament': int(str(g.get('tournament','')).lower() == 'conf_tournament'),
+            'is_ncaa_tournament': int(str(g.get('tournament','')).lower() == 'ncaa_tournament'),
         }
 
         # ── KenPom (prior season) ──

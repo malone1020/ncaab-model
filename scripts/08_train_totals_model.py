@@ -36,6 +36,7 @@ DEFAULT_COMBO = "CONTEXT+TVD+KPD+RECENCY+REFS+TRAVEL"
 CONTEXT_FEATURES = [
     'neutral_site', 'conf_game', 'over_under',
     'home_rest', 'away_rest', 'home_b2b', 'away_b2b',
+    'is_conf_tournament', 'is_ncaa_tournament',
 ]
 
 FEATURE_GROUPS = {
