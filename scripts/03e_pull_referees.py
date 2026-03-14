@@ -98,7 +98,7 @@ def load_games(conn, season=None):
     """).fetchall()
 
 
-def scrape_game(cbbd_id):
+def scrape_game(cbbd_id, debug=False):
     """
     Fetch game summary from ESPN JSON API.
     Returns dict with ref names + foul/FTA/FGA stats, or None on failure.
@@ -106,9 +106,18 @@ def scrape_game(cbbd_id):
     url = ESPN_URL.format(game_id=cbbd_id)
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
+        if debug:
+            print(f"    HTTP {r.status_code} | url={url}")
         if r.status_code != 200:
+            if debug:
+                print(f"    Response: {r.text[:300]}")
             return None
         data = r.json()
+        if debug:
+            print(f"    Keys: {list(data.keys())}")
+            officials = data.get('gameInfo', {}).get('officials', [])
+            print(f"    Officials: {officials[:2]}")
+            print(f"    boxscore teams: {len(data.get('boxscore',{}).get('teams',[]))}")
 
         result = {
             'ref_1': None, 'ref_2': None, 'ref_3': None,
@@ -240,6 +249,7 @@ def parse_args():
     p.add_argument('--wipe',          action='store_true')
     p.add_argument('--profiles-only', action='store_true')
     p.add_argument('--delay',         type=float, default=REQUEST_DELAY)
+    p.add_argument('--debug',         action='store_true', help='Print raw API responses for first 3 games')
     return p.parse_args()
 
 
@@ -278,7 +288,8 @@ if __name__ == '__main__':
     now = datetime.now(timezone.utc).isoformat()
 
     for i, (game_date, home_team, away_team, cbbd_id, season) in enumerate(pending):
-        result = scrape_game(cbbd_id)
+        debug = args.debug and i < 3
+        result = scrape_game(cbbd_id, debug=debug)
         time.sleep(args.delay)
 
         if result is None:
