@@ -273,11 +273,21 @@ if __name__ == '__main__':
             for eg in espn_games:
                 esp_h = normalize(eg['home_team']).lower()
                 esp_a = normalize(eg['away_team']).lower()
+                # Exact match
                 if esp_h == our_h and esp_a == our_a:
                     best_match = eg['espn_id']
                     break
+                # Flipped home/away
+                if esp_h == our_a and esp_a == our_h:
+                    best_match = eg['espn_id']
+                    break
+                # Partial match (either orientation)
                 if (our_h in esp_h or esp_h in our_h) and \
                    (our_a in esp_a or esp_a in our_a):
+                    best_match = eg['espn_id']
+                    break
+                if (our_h in esp_a or esp_a in our_h) and \
+                   (our_a in esp_h or esp_h in our_a):
                     best_match = eg['espn_id']
                     break
 
@@ -290,6 +300,15 @@ if __name__ == '__main__':
             else:
                 total_unmatched += 1
                 unmatched_names.append(f"{our_home} vs {our_away}")
+                # For first unmatched game, show what ESPN had that was close
+                if len(unmatched_names) == 1 and i % 20 == 0:
+                    close = [eg for eg in espn_games
+                             if our_h[:4] in normalize(eg['home_team']).lower()
+                             or our_h[:4] in normalize(eg['away_team']).lower()]
+                    if close:
+                        print(f"    ESPN closest: {[(normalize(g['home_team']), normalize(g['away_team'])) for g in close[:2]]}")
+                    else:
+                        print(f"    No ESPN match found for: {our_h!r} vs {our_a!r}")
 
         conn.commit()
         total_matched += matched
