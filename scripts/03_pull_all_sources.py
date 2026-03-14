@@ -181,6 +181,16 @@ def migrate_tables(conn):
     except Exception as e:
         print(f"  [migrate] haslametrics: {e}")
 
+    # torvik_daily: add adj_t if missing
+    try:
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(torvik_daily)")]
+        if cols and 'adj_t' not in cols:
+            print("  [migrate] Adding adj_t column to torvik_daily...")
+            conn.execute("ALTER TABLE torvik_daily ADD COLUMN adj_t REAL")
+            conn.commit()
+    except Exception as e:
+        print(f"  [migrate] torvik_daily adj_t: {e}")
+
     print("  [migrate] Done.")
 
 
