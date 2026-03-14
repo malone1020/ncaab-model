@@ -807,7 +807,8 @@ def format_bet_line(b):
     else:  # spread
         team = b['home_norm'] if b['bet_side'] == 'home' else b['away_norm']
         side = 'HOME' if b['bet_side'] == 'home' else 'AWAY'
-        sprd = b['spread'] if b['bet_side'] == 'home' else -b['spread']
+        # spread in bet dict is already from bettor's perspective (sprd_display)
+        sprd = b['spread']
         return f"{sprd:+.1f}", f"{team} {sprd:+.1f} ({side})"
 
 
