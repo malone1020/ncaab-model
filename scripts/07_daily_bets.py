@@ -1281,12 +1281,14 @@ if __name__ == '__main__':
     parser.add_argument('--update-results', action='store_true', help='Fetch final scores and mark bet outcomes')
     parser.add_argument('--kelly',          type=float, default=None, help='Kelly fraction (default: 0.25)')
     parser.add_argument('--replay',         action='store_true', help='Load lines from DB instead of OddsAPI (for past dates)')
+    parser.add_argument('--no-totals',      action='store_true', help='Skip totals model (use when game_features_v2 lacks current season data)')
     args = parser.parse_args()
 
     target_date = date.fromisoformat(args.date) if args.date else date.today()
     bankroll    = args.bankroll
     ev_thresh   = args.ev
     kelly_frac  = args.kelly  # None = use default KELLY_FRAC (0.25)
+    no_totals   = args.no_totals
 
     # --update-results: fetch scores and mark outcomes for a saved bet card
     if args.update_results:
@@ -1525,11 +1527,17 @@ if __name__ == '__main__':
                 X_t    = pd.DataFrame([row_t])[totals_features]
 
                 # ── Null feature guard ────────────────────────────────────
-                # If >80% of features are null, the model is scoring on
-                # imputed medians — not real signal. Skip to avoid false edges.
-                null_frac = X_t.isnull().values.mean()
-                if null_frac > 0.80:
-                    print(f"  {label:<40} {'TOTAL':<7} {'—':>6} {'—':>7} {'—':>8}  SKIP (insufficient data: {null_frac:.0%} null)")
+                # Check key efficiency features — if both TVD and KPD are
+                # missing, the model scores on imputed medians (false signal).
+                KEY_FEATS = ['h_tvd_adj_o','h_tvd_adj_d','h_kpd_adj_o','h_kpd_adj_d',
+                             'a_tvd_adj_o','a_tvd_adj_d','a_kpd_adj_o','a_kpd_adj_d']
+                key_null = sum(1 for f in KEY_FEATS if f in X_t.columns and pd.isna(X_t[f].values[0]))
+                if key_null >= 6:  # most key features null = unreliable
+                    print(f"  {label:<40} {'TOTAL':<7} {'—':>6} {'—':>7} {'—':>8}  SKIP (no efficiency data)")
+                    continue
+                # Also skip if --no-totals flag set
+                if no_totals:
+                    print(f"  {label:<40} {'TOTAL':<7} {'—':>6} {'—':>7} {'—':>8}  SKIP (--no-totals)")
                     continue
 
                 Ximp_t = pd.DataFrame(totals_imputer.transform(X_t), columns=totals_features)
