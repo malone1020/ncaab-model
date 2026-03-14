@@ -214,6 +214,9 @@ if __name__ == '__main__':
             print(f"  [{i+1}/{len(dates)}] {game_date} | "
                   f"matched={matched}/{len(our_games)} | "
                   f"total={total_matched} | unmatched={total_unmatched}")
+            if i == 0 and len(our_games) > 0 and espn_games:
+                print(f"  DEBUG ESPN names: {[g['home_team'] for g in espn_games[:5]]}")
+                print(f"  DEBUG Our names:  {[g[1] for g in our_games[:5]]}")
 
     conn.close()
     print()
