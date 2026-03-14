@@ -833,7 +833,9 @@ def load_travel(conn):
 
 
 def load_referee_profiles(conn):
-    """Load referee profiles keyed by (ref_id, season)."""
+    """Load referee profiles keyed by (ref_name, season).
+    Uses ref_name as key — matches CBBpy output which returns names not IDs.
+    """
     try:
         ref_games = pd.read_sql("SELECT * FROM referee_game", conn)
         profiles  = pd.read_sql("SELECT * FROM referee_profiles", conn)
@@ -847,10 +849,12 @@ def load_referee_profiles(conn):
             key = (r['game_date'], r.get('home_team',''), r.get('away_team',''))
             rg_idx[key] = r.to_dict()
 
-        # Index profiles by (ref_id, season) — use season-1 to be safe
+        # Index profiles by (ref_name, season) — use season-1 to avoid leakage
         prof_idx = {}
         for _, r in profiles.iterrows():
-            prof_idx[(str(r['ref_id']), int(r['season']))] = r.to_dict()
+            name = str(r.get('ref_name', '') or '').strip()
+            if name:
+                prof_idx[(name, int(r['season']))] = r.to_dict()
 
         print(f"  referees: {len(rg_idx):,} game assignments, {len(prof_idx):,} profiles")
         return rg_idx, prof_idx
@@ -1205,13 +1209,13 @@ def build_features():
         ref_info = ref_games.get((gd_str_raw, g['home_team'], g['away_team'])) or \
                    ref_games.get((gd_str_raw, home, away)) or {}
         # Aggregate stats across all 3 refs assigned to the game
+        # Profiles keyed by (ref_name, season) — use prior season to avoid leakage
         ref_fpg_vals, ref_bias_vals, ref_ftr_h_vals, ref_ftr_a_vals = [], [], [], []
-        for rk in ['ref1_id','ref2_id','ref3_id']:
-            rid = str(ref_info.get(rk,''))
-            if not rid or rid in ('', 'None', 'nan'):
+        for rk in ['ref_1', 'ref_2', 'ref_3']:
+            rname = str(ref_info.get(rk, '') or '').strip()
+            if not rname or rname in ('', 'None', 'nan'):
                 continue
-            # Use prior season profile to avoid leakage
-            prof = ref_profiles.get((rid, s-1)) or ref_profiles.get((rid, s)) or {}
+            prof = ref_profiles.get((rname, s-1)) or ref_profiles.get((rname, s)) or {}
             if prof.get('avg_fouls_per_game') is not None:
                 ref_fpg_vals.append(prof['avg_fouls_per_game'])
             if prof.get('home_foul_bias') is not None:
