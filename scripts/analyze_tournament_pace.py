@@ -108,29 +108,61 @@ if __name__ == '__main__':
     # ── Line accuracy for regular season (validation) ─────────────────────
     reg_lined = df[(df['game_type']=='regular_season') & df['has_line']]
     print(f"\n{'─'*65}")
-    print("REGULAR SEASON LINE ACCURACY (validation)")
+    print("LINE ACCURACY BY GAME TYPE (games with DK lines)")
     print(f"{'─'*65}")
-    print(f"  N={len(reg_lined):,} | Avg total={reg_lined['actual_total'].mean():.1f} | "
-          f"Avg line={reg_lined['over_under'].mean():.1f} | "
-          f"Avg margin={reg_lined['ou_margin'].mean():+.2f} | "
-          f"Over%={reg_lined['went_over'].mean()*100:.1f}%")
+    print(f"  {'Type':<22} {'N':>5}  {'Avg Total':>10}  {'Avg Line':>10}  {'Margin':>8}  {'Over%':>7}")
+    print(f"  {'─'*65}")
+
+    for gtype in ['regular_season', 'conf_tournament', 'ncaa_tournament']:
+        sub = df[df['game_type']==gtype & df['has_line']] if False else \
+              df[(df['game_type']==gtype) & df['has_line']]
+        if len(sub) < 5:
+            continue
+        avg_total  = sub['actual_total'].mean()
+        avg_line   = sub['over_under'].mean()
+        avg_margin = sub['ou_margin'].mean()
+        over_pct   = sub['went_over'].mean() * 100
+        print(f"  {gtype:<22} {len(sub):>5}  {avg_total:>10.1f}  {avg_line:>10.1f}  "
+              f"{avg_margin:>+8.2f}  {over_pct:>6.1f}%")
 
     # ── Key findings ──────────────────────────────────────────────────────
-    conf = df[df['game_type']=='conf_tournament']['actual_total']
-    ncaa = df[df['game_type']=='ncaa_tournament']['actual_total']
-    reg  = df[df['game_type']=='regular_season']['actual_total']
+    conf_all   = df[df['game_type']=='conf_tournament']
+    ncaa_all   = df[df['game_type']=='ncaa_tournament']
+    conf_lined = df[(df['game_type']=='conf_tournament') & df['has_line']]
+    ncaa_lined = df[(df['game_type']=='ncaa_tournament') & df['has_line']]
+    reg        = df[df['game_type']=='regular_season']
 
     print(f"\n{'═'*65}")
     print("KEY FINDINGS")
     print(f"{'═'*65}")
-    print(f"  Regular season avg:     {reg.mean():.1f} pts")
-    if len(conf)>0:
-        print(f"  Conf tournament avg:    {conf.mean():.1f} pts  ({conf.mean()-reg.mean():+.1f} pts vs reg season)")
-    if len(ncaa)>0:
-        print(f"  NCAA tournament avg:    {ncaa.mean():.1f} pts  ({ncaa.mean()-reg.mean():+.1f} pts vs reg season)")
-    print()
-    print("  IMPORTANT: These are raw scoring differences, not line-adjusted.")
-    print("  The DK line already partially prices in tournament pace.")
-    print("  To get the TRUE model adjustment needed, we need DK tournament lines.")
-    print("  Recommend: scrape DK tournament lines for 2023-2025 to measure")
-    print("  how much the line STILL underestimates after market adjustment.")
+    print(f"  Regular season avg:     {reg['actual_total'].mean():.1f} pts  "
+          f"(line margin: {reg_lined['ou_margin'].mean():+.2f})")
+
+    if len(conf_all) > 0:
+        print(f"\n  Conf tournament:")
+        print(f"    Actual avg:  {conf_all['actual_total'].mean():.1f} pts  "
+              f"({conf_all['actual_total'].mean()-reg['actual_total'].mean():+.1f} vs reg season)")
+        if len(conf_lined) >= 5:
+            print(f"    Line margin: {conf_lined['ou_margin'].mean():+.2f} pts  "
+                  f"Over%: {conf_lined['went_over'].mean()*100:.1f}%  "
+                  f"(N={len(conf_lined)})")
+            residual = conf_lined['ou_margin'].mean() - reg_lined['ou_margin'].mean()
+            print(f"    Residual vs reg season: {residual:+.2f} pts  "
+                  f"← model adjustment needed")
+
+    if len(ncaa_all) > 0:
+        print(f"\n  NCAA tournament:")
+        print(f"    Actual avg:  {ncaa_all['actual_total'].mean():.1f} pts  "
+              f"({ncaa_all['actual_total'].mean()-reg['actual_total'].mean():+.1f} vs reg season)")
+        if len(ncaa_lined) >= 5:
+            print(f"    Line margin: {ncaa_lined['ou_margin'].mean():+.2f} pts  "
+                  f"Over%: {ncaa_lined['went_over'].mean()*100:.1f}%  "
+                  f"(N={len(ncaa_lined)})")
+            residual = ncaa_lined['ou_margin'].mean() - reg_lined['ou_margin'].mean()
+            print(f"    Residual vs reg season: {residual:+.2f} pts  "
+                  f"← model adjustment needed")
+
+    print(f"\n  INTERPRETATION:")
+    print(f"  'Line margin' = actual total - DK line. Regular season = {reg_lined['ou_margin'].mean():+.2f} pts (baseline).")
+    print(f"  'Residual' = tournament margin - regular season margin.")
+    print(f"  Positive residual = DK line still underestimates tournament totals = model should adjust UP.")
