@@ -1,39 +1,39 @@
-import sqlite3, os, pandas as pd
+import sqlite3, os
+from collections import defaultdict
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB = os.path.join(ROOT, 'data', 'basketball.db')
 conn = sqlite3.connect(DB)
 
-# Load team-season coverage from kenpom_daily and torvik_daily
-# Check which (season, team) combos have any data at all
-kpd_teams = set(conn.execute(
-    "SELECT DISTINCT season, team FROM kenpom_daily").fetchall())
-tvd_teams = set(conn.execute(
-    "SELECT DISTINCT season, team FROM torvik_daily").fetchall())
+kpd_teams = set(r[0] for r in conn.execute(
+    "SELECT DISTINCT team FROM kenpom_daily").fetchall())
 
 games = conn.execute(
     "SELECT season, home_team, away_team FROM games").fetchall()
-conn.close()
 
-print(f"KPD unique season-team pairs: {len(kpd_teams):,}")
-print(f"TVD unique season-team pairs: {len(tvd_teams):,}")
-print()
-
-from collections import defaultdict
-kpd_by_season = defaultdict(int)
-tvd_by_season = defaultdict(int)
-total_by_season = defaultdict(int)
-
+# Find teams in games that have NO KPD data at all
+missing = set()
 for season, home, away in games:
-    total_by_season[season] += 1
-    if (season, home) in kpd_teams and (season, away) in kpd_teams:
-        kpd_by_season[season] += 1
-    if (season, home) in tvd_teams and (season, away) in tvd_teams:
-        tvd_by_season[season] += 1
+    if home not in kpd_teams: missing.add(home)
+    if away not in kpd_teams: missing.add(away)
 
-print(f"{'Season':>8} {'Games':>7} {'KPD%':>7} {'TVD%':>7}")
-print("-" * 35)
-for s in sorted(total_by_season):
-    n = total_by_season[s]
-    kp = kpd_by_season[s]/n*100
-    tv = tvd_by_season[s]/n*100
-    print(f"  {int(s):>6} {n:>7,} {kp:>6.0f}% {tv:>6.0f}%")
+print(f"Teams in games table with no KPD data: {len(missing):,}")
+print(f"\nSample missing teams:")
+for t in sorted(missing)[:30]:
+    print(f"  {t}")
+
+# How many games involve at least one non-D1 team?
+non_d1_games = sum(1 for s,h,a in games
+                   if h not in kpd_teams or a not in kpd_teams)
+d1_games = len(games) - non_d1_games
+print(f"\nTotal games: {len(games):,}")
+print(f"Games with both teams in KPD: {d1_games:,} ({d1_games/len(games)*100:.0f}%)")
+print(f"Games with >=1 non-D1 team:   {non_d1_games:,} ({non_d1_games/len(games)*100:.0f}%)")
+print(f"\nNote: non-D1 games have no spread/line and won't be bet on anyway.")
+print(f"What matters is D1 vs D1 game coverage.")
+
+# Check D1 only games — do they have good KPD coverage?
+d1_only = [(s,h,a) for s,h,a in games
+           if h in kpd_teams and a in kpd_teams]
+print(f"\nAmong D1-only games: {len(d1_only):,}")
+print(f"These should all have KPD data available.")
+conn.close()
