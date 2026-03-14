@@ -855,7 +855,15 @@ def load_referee_profiles(conn):
         for _, r in profiles.iterrows():
             name = str(r.get('ref_name', '') or '').strip()
             if name:
-                prof_idx[(name, int(r['season']))] = r.to_dict()
+                try:
+                    season_val = r['season']
+                    # Handle binary-encoded integers from SQLite
+                    if isinstance(season_val, bytes):
+                        import struct
+                        season_val = struct.unpack('<q', season_val.ljust(8, b'\x00')[:8])[0]
+                    prof_idx[(name, int(season_val))] = r.to_dict()
+                except Exception:
+                    pass
 
         print(f"  referees: {len(rg_idx):,} game assignments, {len(prof_idx):,} profiles")
         return rg_idx, prof_idx
