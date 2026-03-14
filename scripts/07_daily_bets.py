@@ -1390,6 +1390,9 @@ if __name__ == '__main__':
 
     conn = sqlite3.connect(DB)
     bets = []
+    totals_over_count = 0   # track correlated over bets
+    totals_under_count = 0  # track correlated under bets
+    MAX_SAME_DIRECTION_TOTALS = 4  # max overs or unders on same slate
 
     print(f"\nScoring {len(games)} game(s) across SPREAD / TOTAL / ML markets...")
     print(f"  {'Game':<40} {'MKT':<7} {'P':>6} {'EDGE':>7} {'EV':>8}  Status")
@@ -1481,7 +1484,9 @@ if __name__ == '__main__':
                     ml_in_range = is_big_fav or is_dog
                     edge_ml = (p_ml - 0.5238) * 100
 
-                    qual_ml = best_ml_ev >= ev_thresh and ml_in_range
+                    # Require BOTH positive EV AND positive edge (p > breakeven)
+                    # Negative edge with positive EV = long-shot math artifact, not real edge
+                    qual_ml = best_ml_ev >= ev_thresh and ml_in_range and edge_ml > 0
                     if ml_in_range:
                         status_ml = f"✓ BET {'HOME' if ml_side=='home' else 'AWAY'}" if qual_ml else "—"
                         print(f"  {label:<40} {'ML':<7} {p_ml:>6.3f} {edge_ml:>+6.1f}% {best_ml_ev:>+8.3f}  {status_ml}")
@@ -1518,6 +1523,15 @@ if __name__ == '__main__':
                 )
                 row_t['over_under'] = total
                 X_t    = pd.DataFrame([row_t])[totals_features]
+
+                # ── Null feature guard ────────────────────────────────────
+                # If >80% of features are null, the model is scoring on
+                # imputed medians — not real signal. Skip to avoid false edges.
+                null_frac = X_t.isnull().values.mean()
+                if null_frac > 0.80:
+                    print(f"  {label:<40} {'TOTAL':<7} {'—':>6} {'—':>7} {'—':>8}  SKIP (insufficient data: {null_frac:.0%} null)")
+                    continue
+
                 Ximp_t = pd.DataFrame(totals_imputer.transform(X_t), columns=totals_features)
                 p_over = float(totals_model.predict_proba(Ximp_t)[0][1])
 
@@ -1546,13 +1560,31 @@ if __name__ == '__main__':
                 edge_tot = (p_tot - 0.5238) * 100
 
                 qual_tot = best_tot_ev >= ev_thresh
-                status_tot = f"✓ BET {'OVER' if tot_dir=='over' else 'UNDER'}" if qual_tot else "—"
+
+                # Correlated bet cap — limit same-direction totals per slate
+                corr_capped = False
+                if qual_tot:
+                    if tot_dir == 'over' and totals_over_count >= MAX_SAME_DIRECTION_TOTALS:
+                        qual_tot = False
+                        corr_capped = True
+                    elif tot_dir == 'under' and totals_under_count >= MAX_SAME_DIRECTION_TOTALS:
+                        qual_tot = False
+                        corr_capped = True
+
+                if corr_capped:
+                    status_tot = f"— (corr.cap)"
+                else:
+                    status_tot = f"✓ BET {'OVER' if tot_dir=='over' else 'UNDER'}" if qual_tot else "—"
                 tot_label = f"{('O' if tot_dir=='over' else 'U')}{total}"
                 print(f"  {label:<40} {f'TOTAL {tot_label}':<7} {p_tot:>6.3f} {edge_tot:>+6.1f}% {best_tot_ev:>+8.3f}  {status_tot}")
 
                 if qual_tot:
                     sz_t = kelly_size(best_tot_ev, bankroll, kelly_frac)
                     if sz_t >= 10:
+                        if tot_dir == 'over':
+                            totals_over_count += 1
+                        else:
+                            totals_under_count += 1
                         bets.append({
                             'home_team': g['home_team'], 'away_team': g['away_team'],
                             'home_norm': hn_t, 'away_norm': an_t,
@@ -1564,6 +1596,8 @@ if __name__ == '__main__':
                             'bet_type': 'total', 'total_dir': tot_dir.capitalize(),
                             'game_time': str(g['game_time']),
                             'has_fanmatch': bool(row_t.get('has_kp_fanmatch')),
+                            'injury_flag': bool(h_injured or a_injured),
+                            'injury_detail': [(h_norm, h_injured), (a_norm, a_injured)],
                         })
             except Exception as e:
                 print(f"  {label:<40} {'TOTAL':<7} ERROR: {e}")
