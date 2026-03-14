@@ -1,17 +1,14 @@
 """
 03e_pull_referees.py
 ====================
-Scrape referee assignments + foul stats for all NCAAB games using
-ESPN's public JSON summary API (more reliable than HTML scraping).
+Scrape referee assignments + foul stats for NCAAB games using ESPN's JSON API.
 
-Endpoint: https://site.api.espn.com/apis/site/v2/sports/basketball/
-          mens-college-basketball/summary?event={cbbd_id}
+Two-phase approach:
+  Phase 1: For each game date, hit ESPN scoreboard to get ESPN game IDs
+           matched to our home/away team names
+  Phase 2: For each game, hit ESPN summary endpoint to get refs + box score
 
-Returns refs (officials) + full box score including team fouls and FTA.
-
-Populates:
-  referee_game     -- ref names + foul counts per game
-  referee_profiles -- per-ref season foul tendency profiles
+Adds espn_id column to games table for future use.
 
 Run: python scripts/03e_pull_referees.py --season 2025
      python scripts/03e_pull_referees.py --resume
@@ -20,6 +17,7 @@ Run: python scripts/03e_pull_referees.py --season 2025
 
 import sqlite3, os, time, argparse, warnings
 from datetime import datetime, timezone
+from collections import defaultdict
 import requests
 import pandas as pd
 import numpy as np
@@ -29,20 +27,29 @@ warnings.filterwarnings('ignore')
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB   = os.path.join(ROOT, 'data', 'basketball.db')
 
-ESPN_URL = ("https://site.api.espn.com/apis/site/v2/sports/basketball/"
-            "mens-college-basketball/summary?event={game_id}")
+ESPN_SCOREBOARD = ("https://site.api.espn.com/apis/site/v2/sports/basketball/"
+                   "mens-college-basketball/scoreboard?dates={date}&limit=200")
+ESPN_SUMMARY    = ("https://site.api.espn.com/apis/site/v2/sports/basketball/"
+                   "mens-college-basketball/summary?event={game_id}")
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
     'Accept': 'application/json',
-    'Referer': 'https://www.espn.com/',
 }
 
-REQUEST_DELAY = 1.0
+REQUEST_DELAY = 0.5   # scoreboard calls are cheap
+SUMMARY_DELAY = 1.0   # summary calls — be polite
 BATCH_COMMIT  = 50
 
 
 def setup_db(conn):
+    # Add espn_id column to games if not present
+    cols = [c[1] for c in conn.execute('PRAGMA table_info(games)').fetchall()]
+    if 'espn_id' not in cols:
+        conn.execute("ALTER TABLE games ADD COLUMN espn_id TEXT")
+        conn.commit()
+        print("  Added espn_id column to games table")
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS referee_game (
             game_date   TEXT,
@@ -77,6 +84,113 @@ def setup_db(conn):
     conn.commit()
 
 
+def normalize(name):
+    """Basic normalization for team name matching."""
+    return name.lower().strip().replace('.', '').replace("'", '').replace('-', ' ')
+
+
+def fetch_espn_ids_for_date(date_str):
+    """
+    Fetch ESPN game IDs for all games on a given date.
+    date_str: YYYYMMDD format
+    Returns dict: {(home_norm, away_norm): espn_id}
+    """
+    url = ESPN_SCOREBOARD.format(date=date_str)
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        if r.status_code != 200:
+            return {}
+        data = r.json()
+        result = {}
+        for event in data.get('events', []):
+            espn_id = str(event.get('id', ''))
+            comps = event.get('competitions', [{}])
+            if not comps:
+                continue
+            comp = comps[0]
+            competitors = comp.get('competitors', [])
+            home = away = None
+            for c in competitors:
+                team_name = c.get('team', {}).get('displayName', '')
+                if c.get('homeAway') == 'home':
+                    home = team_name
+                else:
+                    away = team_name
+            if home and away and espn_id:
+                result[(normalize(home), normalize(away))] = espn_id
+                result[(normalize(away), normalize(home))] = espn_id  # both directions
+        return result
+    except Exception:
+        return {}
+
+
+def match_espn_id(home_team, away_team, espn_map):
+    """Try to match our team names to ESPN's using normalization."""
+    h = normalize(home_team)
+    a = normalize(away_team)
+
+    # Direct match
+    eid = espn_map.get((h, a))
+    if eid:
+        return eid
+
+    # Partial match — check if our name is contained in ESPN's or vice versa
+    for (eh, ea), eid in espn_map.items():
+        if (h in eh or eh in h) and (a in ea or ea in a):
+            return eid
+        if (h in ea or ea in h) and (a in eh or eh in a):
+            return eid
+
+    return None
+
+
+def fetch_refs_and_fouls(espn_id):
+    """
+    Fetch refs + box score from ESPN summary endpoint.
+    Returns dict or None.
+    """
+    url = ESPN_SUMMARY.format(game_id=espn_id)
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+
+        result = {
+            'ref_1': None, 'ref_2': None, 'ref_3': None,
+            'home_fouls': None, 'away_fouls': None,
+            'home_fta': None,   'away_fta': None,
+            'home_fga': None,   'away_fga': None,
+        }
+
+        # Refs
+        officials = data.get('gameInfo', {}).get('officials', [])
+        for i, o in enumerate(officials[:3]):
+            name = o.get('fullName') or o.get('displayName', '')
+            if name:
+                result[f'ref_{i+1}'] = name.strip()
+
+        # Box score stats
+        for team_data in data.get('boxscore', {}).get('teams', []):
+            side = 'home' if team_data.get('homeAway') == 'home' else 'away'
+            for stat in team_data.get('statistics', []):
+                name = stat.get('name', '').lower()
+                try:
+                    val = float(stat.get('displayValue', ''))
+                except (ValueError, TypeError):
+                    continue
+                if 'foul' in name:
+                    result[f'{side}_fouls'] = val
+                elif name in ('freethrowsattempted', 'fta'):
+                    result[f'{side}_fta'] = val
+                elif name in ('fieldgoalsattempted', 'fga'):
+                    result[f'{side}_fga'] = val
+
+        return result
+    except Exception:
+        return None
+
+
 def get_already_scraped(conn):
     rows = conn.execute(
         "SELECT game_date, home_team, away_team FROM referee_game"
@@ -87,83 +201,14 @@ def get_already_scraped(conn):
 def load_games(conn, season=None):
     if season:
         return conn.execute("""
-            SELECT game_date, home_team, away_team, espn_id, season
-            FROM games
-            WHERE season = ? AND espn_id IS NOT NULL AND espn_id != ''
+            SELECT game_date, home_team, away_team, season, espn_id
+            FROM games WHERE season = ?
             ORDER BY game_date
         """, (season,)).fetchall()
     return conn.execute("""
-        SELECT game_date, home_team, away_team, espn_id, season
-        FROM games
-        WHERE espn_id IS NOT NULL AND espn_id != ''
-        ORDER BY game_date
+        SELECT game_date, home_team, away_team, season, espn_id
+        FROM games ORDER BY game_date
     """).fetchall()
-
-
-def scrape_game(cbbd_id, debug=False):
-    """
-    Fetch game summary from ESPN JSON API.
-    Returns dict with ref names + foul/FTA/FGA stats, or None on failure.
-    """
-    url = ESPN_URL.format(game_id=cbbd_id)
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        if debug:
-            print(f"    HTTP {r.status_code} | url={url}")
-        if r.status_code != 200:
-            if debug:
-                print(f"    Response: {r.text[:300]}")
-            return None
-        data = r.json()
-        if debug:
-            print(f"    Keys: {list(data.keys())}")
-            officials = data.get('gameInfo', {}).get('officials', [])
-            print(f"    Officials: {officials[:2]}")
-            print(f"    boxscore teams: {len(data.get('boxscore',{}).get('teams',[]))}")
-
-        result = {
-            'ref_1': None, 'ref_2': None, 'ref_3': None,
-            'home_fouls': None, 'away_fouls': None,
-            'home_fta': None,   'away_fta': None,
-            'home_fga': None,   'away_fga': None,
-        }
-
-        # Extract referee names from gameInfo.officials
-        officials = data.get('gameInfo', {}).get('officials', [])
-        for i, o in enumerate(officials[:3]):
-            name = o.get('fullName') or o.get('displayName') or o.get('name', '')
-            if name:
-                result[f'ref_{i+1}'] = name.strip()
-
-        # Extract team foul/FTA/FGA from box score
-        # ESPN structure: boxscore.teams[0/1].statistics array
-        boxscore = data.get('boxscore', {})
-        teams_bs = boxscore.get('teams', [])
-
-        for team_data in teams_bs:
-            home_away = team_data.get('homeAway', '')
-            side = 'home' if home_away == 'home' else 'away'
-            stats = team_data.get('statistics', [])
-
-            for stat in stats:
-                name = stat.get('name', '').lower()
-                val  = stat.get('displayValue', '')
-                try:
-                    fval = float(val)
-                except (ValueError, TypeError):
-                    continue
-
-                if name == 'foulscommitted' or name == 'teamfouls' or 'foul' in name:
-                    result[f'{side}_fouls'] = fval
-                elif name == 'freethrowsattempted' or name == 'fta':
-                    result[f'{side}_fta'] = fval
-                elif name == 'fieldgoalsattempted' or name == 'fga':
-                    result[f'{side}_fga'] = fval
-
-        return result
-
-    except Exception:
-        return None
 
 
 def build_referee_profiles(conn):
@@ -216,16 +261,14 @@ def build_referee_profiles(conn):
         hg = pd.to_numeric(grp['home_fga'],   errors='coerce')
         ag = pd.to_numeric(grp['away_fga'],   errors='coerce')
 
-        avg_fpg = float(tf.mean()) if tf.sum() > 0 else None
-
-        valid_bias = (hf + af).dropna()
-        valid_bias = valid_bias[valid_bias > 0]
-        home_bias  = float((hf[valid_bias.index] / valid_bias).mean()) if len(valid_bias) > 0 else None
-
-        vh    = hg[hg > 0]
-        ftr_h = float((ht[vh.index] / vh).mean()) if len(vh) > 0 else None
-        va    = ag[ag > 0]
-        ftr_a = float((at[va.index] / va).mean()) if len(va) > 0 else None
+        avg_fpg   = float(tf.mean()) if tf.sum() > 0 else None
+        vb        = (hf + af).dropna()
+        vb        = vb[vb > 0]
+        home_bias = float((hf[vb.index] / vb).mean()) if len(vb) > 0 else None
+        vh        = hg[hg > 0]
+        ftr_h     = float((ht[vh.index] / vh).mean()) if len(vh) > 0 else None
+        va        = ag[ag > 0]
+        ftr_a     = float((at[va.index] / va).mean()) if len(va) > 0 else None
 
         profiles.append((ref_name, season, len(grp), avg_fpg, home_bias, ftr_h, ftr_a, now))
 
@@ -238,7 +281,7 @@ def build_referee_profiles(conn):
     """, profiles)
     conn.commit()
 
-    n_fouls    = sum(1 for p in profiles if p[3] is not None)
+    n_fouls     = sum(1 for p in profiles if p[3] is not None)
     unique_refs = df['ref_name'].nunique()
     print(f"  {len(profiles):,} ref-season profiles | {unique_refs:,} unique refs")
     print(f"  Profiles with foul data: {n_fouls:,}/{len(profiles):,}")
@@ -250,8 +293,6 @@ def parse_args():
     p.add_argument('--resume',        action='store_true')
     p.add_argument('--wipe',          action='store_true')
     p.add_argument('--profiles-only', action='store_true')
-    p.add_argument('--delay',         type=float, default=REQUEST_DELAY)
-    p.add_argument('--debug',         action='store_true', help='Print raw API responses for first 3 games')
     return p.parse_args()
 
 
@@ -259,7 +300,7 @@ if __name__ == '__main__':
     args = parse_args()
 
     print("=" * 60)
-    print("NCAAB -- Referee Scraper (ESPN JSON API)")
+    print("NCAAB -- Referee Scraper (ESPN JSON API, 2-phase)")
     print("=" * 60)
 
     conn = sqlite3.connect(DB)
@@ -279,58 +320,106 @@ if __name__ == '__main__':
 
     all_games = load_games(conn, season=args.season)
     already   = get_already_scraped(conn) if args.resume else set()
-    pending   = [(gd, ht, at, gid, s) for gd, ht, at, gid, s in all_games
+    pending   = [(gd, ht, at, s, eid) for gd, ht, at, s, eid in all_games
                  if (gd, ht, at) not in already]
 
-    print(f"  Games to scrape: {len(pending):,}")
-    print(f"  Est. time: ~{len(pending)*args.delay/3600:.1f} hrs at {args.delay}s/req")
-    print()
+    print(f"  Games to process: {len(pending):,}")
 
-    found_refs = found_fouls = failed = 0
+    # Phase 1: build ESPN ID map by date
+    print("\nPhase 1: Fetching ESPN game IDs by date...")
+    dates = sorted(set(gd for gd, *_ in pending))
+    espn_id_cache = {}   # date_str -> {(home_norm, away_norm): espn_id}
+    id_hits = 0
+
+    for i, game_date in enumerate(dates):
+        date_nodash = game_date.replace('-', '')
+        espn_map = fetch_espn_ids_for_date(date_nodash)
+        espn_id_cache[game_date] = espn_map
+        id_hits += len(espn_map) // 2  # divide by 2 since we store both directions
+        time.sleep(REQUEST_DELAY)
+        if (i+1) % 20 == 0 or i == 0:
+            print(f"  [{i+1}/{len(dates)}] {game_date} | {len(espn_map)//2} games found | total={id_hits}")
+
+    print(f"  Phase 1 done. ESPN IDs found for ~{id_hits} games across {len(dates)} dates")
+
+    # Save ESPN IDs back to games table
+    print("\n  Saving ESPN IDs to games table...")
+    saved_ids = 0
+    for game_date, home_team, away_team, season, existing_eid in pending:
+        if existing_eid:
+            continue  # already have it
+        espn_map = espn_id_cache.get(game_date, {})
+        eid = match_espn_id(home_team, away_team, espn_map)
+        if eid:
+            conn.execute("""
+                UPDATE games SET espn_id = ?
+                WHERE game_date = ? AND home_team = ? AND away_team = ?
+            """, (eid, game_date, home_team, away_team))
+            saved_ids += 1
+    conn.commit()
+    print(f"  Saved {saved_ids:,} ESPN IDs to games table")
+
+    # Phase 2: fetch refs + fouls for each game
+    print(f"\nPhase 2: Fetching refs + box scores ({len(pending):,} games)...")
+    print(f"  Est. time: ~{len(pending)*SUMMARY_DELAY/3600:.1f} hrs at {SUMMARY_DELAY}s/req\n")
+
+    found_refs = found_fouls = failed = no_id = 0
     now = datetime.now(timezone.utc).isoformat()
 
-    for i, (game_date, home_team, away_team, cbbd_id, season) in enumerate(pending):
-        debug = args.debug and i < 3
-        result = scrape_game(cbbd_id, debug=debug)
-        time.sleep(args.delay)
+    for i, (game_date, home_team, away_team, season, existing_eid) in enumerate(pending):
+        # Get ESPN ID — use stored or look up from cache
+        espn_id = existing_eid
+        if not espn_id:
+            espn_map = espn_id_cache.get(game_date, {})
+            espn_id  = match_espn_id(home_team, away_team, espn_map)
 
-        if result is None:
-            failed += 1
+        if not espn_id:
+            no_id += 1
             conn.execute("""
                 INSERT OR IGNORE INTO referee_game
                 (game_date, home_team, away_team, scraped_at) VALUES (?,?,?,?)
             """, (game_date, home_team, away_team, now))
         else:
-            if result['ref_1']:      found_refs  += 1
-            if result['home_fouls']: found_fouls += 1
-            conn.execute("""
-                INSERT OR REPLACE INTO referee_game
-                (game_date, home_team, away_team,
-                 ref_1, ref_2, ref_3,
-                 home_fouls, away_fouls,
-                 home_fta, away_fta, home_fga, away_fga,
-                 scraped_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """, (
-                game_date, home_team, away_team,
-                result['ref_1'], result['ref_2'], result['ref_3'],
-                result['home_fouls'], result['away_fouls'],
-                result['home_fta'],   result['away_fta'],
-                result['home_fga'],   result['away_fga'],
-                now,
-            ))
+            result = fetch_refs_and_fouls(espn_id)
+            time.sleep(SUMMARY_DELAY)
+
+            if result is None:
+                failed += 1
+                conn.execute("""
+                    INSERT OR IGNORE INTO referee_game
+                    (game_date, home_team, away_team, scraped_at) VALUES (?,?,?,?)
+                """, (game_date, home_team, away_team, now))
+            else:
+                if result['ref_1']:      found_refs  += 1
+                if result['home_fouls']: found_fouls += 1
+                conn.execute("""
+                    INSERT OR REPLACE INTO referee_game
+                    (game_date, home_team, away_team,
+                     ref_1, ref_2, ref_3,
+                     home_fouls, away_fouls,
+                     home_fta, away_fta, home_fga, away_fga,
+                     scraped_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (
+                    game_date, home_team, away_team,
+                    result['ref_1'], result['ref_2'], result['ref_3'],
+                    result['home_fouls'], result['away_fouls'],
+                    result['home_fta'],   result['away_fta'],
+                    result['home_fga'],   result['away_fga'],
+                    now,
+                ))
 
         if (i+1) % BATCH_COMMIT == 0:
             conn.commit()
         if (i+1) % 10 == 0 or i == 0:
             pct = (i+1) / len(pending) * 100
             print(f"  [{i+1}/{len(pending)}] ({pct:.0f}%) {game_date} | "
-                  f"refs={found_refs} fouls={found_fouls} failed={failed}")
+                  f"refs={found_refs} fouls={found_fouls} no_id={no_id} failed={failed}")
 
     conn.commit()
     print()
     print("=" * 60)
-    print(f"Done. refs={found_refs} | fouls={found_fouls} | failed={failed}")
+    print(f"Done. refs={found_refs} | fouls={found_fouls} | no_id={no_id} | failed={failed}")
 
     build_referee_profiles(conn)
     conn.close()
