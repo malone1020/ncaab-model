@@ -80,16 +80,144 @@ ODDS_NICKNAMES = {
 }
 
 
-def strip_nickname(name):
-    parts = name.rsplit(' ', 1)
+# Full CBBD_TO_TORVIK mapping — same as 04_build_features.py
+# Ensures OddsAPI names ("Iowa State") resolve to DB canonical ("Iowa St.")
+CBBD_TO_TORVIK = {
+    'A&M-Corpus Christi': 'Texas A&M-Corpus Christi', 'ALR': 'Little Rock',
+    'AR-Pine Bluff': 'Arkansas Pine Bluff', 'ASU': 'Arizona St.',
+    'Abil Chr': 'Abilene Christian', 'Abil Christian': 'Abilene Christian',
+    'Abilene Christian University': 'Abilene Christian',
+    'Alabama Birmingham': 'Alabama-Birmingham', 'Alabama St': 'Alabama St.',
+    'Alabama State': 'Alabama St.', 'American Univ': 'American',
+    'American University': 'American', 'App St': 'Appalachian St.',
+    'App State': 'Appalachian St.', 'Appalachian St': 'Appalachian St.',
+    'Appalachian State': 'Appalachian St.', 'Arizona St': 'Arizona St.',
+    'Arizona State': 'Arizona St.', 'Ark.-Pine Bluff': 'Arkansas Pine Bluff',
+    'Arkansas Little Rock': 'Little Rock', 'Arkansas State': 'Arkansas St.',
+    'Arkansas-Pine Bluff': 'Arkansas Pine Bluff', 'Ball State': 'Ball St.',
+    'Bethune-Cookman': 'Bethune Cookman', 'Boise St': 'Boise St.',
+    'Boise State': 'Boise St.', 'BYU': 'BYU',
+    'C Michigan': 'Central Michigan', 'Cal State Bakersfield': 'Cal St. Bakersfield',
+    'Cal State Fullerton': 'Cal St. Fullerton', 'Cal State Northridge': 'Cal St. Northridge',
+    'CalBaptist': 'Cal Baptist', 'California Baptist': 'Cal Baptist',
+    'Central Conn.': 'Central Connecticut', 'Central Mich': 'Central Michigan',
+    'Central Mich.': 'Central Michigan', 'Chicago St': 'Chicago St.',
+    'Chicago State': 'Chicago St.', 'Cleveland St': 'Cleveland St.',
+    'Cleveland State': 'Cleveland St.', 'Coast Carolina': 'Coastal Carolina',
+    'Colorado State': 'Colorado St.', 'Coppin St': 'Coppin St.',
+    'Coppin State': 'Coppin St.', 'Delaware St': 'Delaware St.',
+    'Delaware State': 'Delaware St.', 'E Michigan': 'Eastern Michigan',
+    'East Tennessee State': 'ETSU', 'East Texas A&M': 'Texas A&M-Commerce',
+    'ETSU': 'East Tennessee St.', 'FAU': 'Florida Atlantic',
+    'FGCU': 'Florida Gulf Coast', 'FIU': 'Florida International',
+    'Florida International': 'FIU', 'Florida State': 'Florida St.',
+    'Fresno St': 'Fresno St.', 'Fresno State': 'Fresno St.',
+    'Gardner-Webb': 'Gardner Webb', 'Georgia State': 'Georgia St.',
+    'Grambling': 'Grambling St.', "Hawai'i": 'Hawaii',
+    'Houston Chr': 'Houston Christian', 'Idaho St': 'Idaho St.',
+    'Idaho State': 'Idaho St.', 'Illinois St': 'Illinois St.',
+    'Illinois State': 'Illinois St.', 'Indiana St': 'Indiana St.',
+    'Indiana State': 'Indiana St.', 'Iowa State': 'Iowa St.',
+    'IU Indy': 'IU Indianapolis', 'IUPUI': 'IU Indianapolis',
+    'Jackson State': 'Jackson St.', 'Jacksonville': 'Jacksonville St.',
+    'Jacksonville St': 'Jacksonville St.', 'Jacksonville State': 'Jacksonville St.',
+    'Kansas State': 'Kansas St.', 'Kennesaw State': 'Kennesaw St.',
+    'Kent': 'Kent St.', 'Kent St': 'Kent St.', 'Kent State': 'Kent St.',
+    'LA Tech': 'Louisiana Tech', 'LIU Brooklyn': 'LIU',
+    'LMU (CA)': 'Loyola Marymount', 'Long Beach State': 'Long Beach St.',
+    'Long Island': 'LIU', 'Long Island University': 'LIU',
+    'Louisiana': 'Louisiana-Lafayette', 'Louisiana-Monroe': 'Louisiana Monroe',
+    'Loyola (IL)': 'Loyola Chicago', 'Loyola (MD)': 'Loyola MD',
+    'Loyola Chicago': 'Loyola Chicago', 'Loyola Maryland': 'Loyola MD',
+    'LSU': 'LSU', 'Maryland Eastern Shore': 'Maryland-Eastern Shore',
+    'McNeese': 'McNeese St.', 'McNeese St': 'McNeese St.',
+    'McNeese State': 'McNeese St.', 'Miami': 'Miami (FL)',
+    'Miami (OH)': 'Miami (OH)', 'Miami FL': 'Miami (FL)',
+    'Miami Ohio': 'Miami (OH)', 'Miami-FL': 'Miami (FL)',
+    'Michigan St': 'Michigan St.', 'Michigan State': 'Michigan St.',
+    'Mississippi': 'Mississippi', 'Mississippi Rebels': 'Mississippi',
+    'Mississippi State': 'Mississippi St.', 'Missouri State': 'Missouri St.',
+    'Montana State': 'Montana St.', 'Morehead State': 'Morehead St.',
+    'Morgan St': 'Morgan St.', 'Morgan State': 'Morgan St.',
+    'Mount St. Mary\'s': "Mount St. Mary's", 'Murray State': 'Murray St.',
+    'N Dakota St': 'North Dakota St.', 'N.C. State': 'N.C. State',
+    'N. Illinois': 'Northern Illinois', 'NC State': 'N.C. State',
+    'New Mexico State': 'New Mexico St.', 'Nicholls': 'Nicholls St.',
+    'Nicholls St': 'Nicholls St.', 'Nicholls State': 'Nicholls St.',
+    'NIU': 'Northern Illinois', 'Norfolk St': 'Norfolk St.',
+    'Norfolk State': 'Norfolk St.', 'North Dakota State': 'North Dakota St.',
+    'Northwestern St': 'Northwestern St.', 'Northwestern State': 'Northwestern St.',
+    'Ohio State': 'Ohio St.', 'Oklahoma State': 'Oklahoma St.',
+    'Ole Miss': 'Mississippi', 'Omaha': 'Nebraska Omaha',
+    'Oregon State': 'Oregon St.', 'Penn State': 'Penn St.',
+    'Pennsylvania': 'Penn', 'Pitt': 'Pittsburgh',
+    'Portland St': 'Portland St.', 'Portland State': 'Portland St.',
+    'Prairie View A&M': 'Prairie View', 'PV A&M': 'Prairie View',
+    "Saint John's": "St. John's (NY)", "Saint John's (NY)": "St. John's (NY)",
+    'Saint Francis': 'St. Francis (PA)', 'Saint Francis (BKN)': 'St. Francis Brooklyn',
+    'Saint Francis (PA)': 'St. Francis (PA)', 'Sam Houston': 'Sam Houston St.',
+    'Sam Houston State': 'Sam Houston St.', 'San Diego State': 'San Diego St.',
+    'S Carolina St': 'South Carolina St.', 'South Carolina State': 'South Carolina St.',
+    'South Carolina St': 'South Carolina St.',
+    'South Dakota St': 'South Dakota St.', 'South Dakota State': 'South Dakota St.',
+    'Southeast Missouri State': 'Southeast Missouri St.',
+    'Southeastern Louisiana': 'Southeastern La.', 'SE Louisiana': 'Southeastern La.',
+    'SMU': 'Southern Methodist', 'Southern': 'Southern U.',
+    'Southern (LA)': 'Southern U.', 'Southern Miss': 'Southern Mississippi',
+    'Southern Univ': 'Southern U.', 'Southern University': 'Southern U.',
+    "St John's": "St. John's (NY)", "St. Francis": 'St. Francis (PA)',
+    'Stephen F Austin': 'Stephen F. Austin', 'SFA': 'Stephen F. Austin',
+    'SIU Edwardsville': 'SIU-Edwardsville', 'SIUE': 'SIU-Edwardsville',
+    'Tarleton': 'Tarleton St.', 'Tarleton St': 'Tarleton St.',
+    'Tarleton State': 'Tarleton St.', 'TCU': 'TCU',
+    'Tennessee Martin': 'Tennessee-Martin', 'Tennessee State': 'Tennessee St.',
+    'Tex. A&M-Commerce': 'Texas A&M-Commerce',
+    'Texas A&M Corpus Christi': 'Texas A&M-Corpus Christi',
+    'Texas A&M-CC': 'Texas A&M-Corpus Christi', 'Texas Christian': 'TCU',
+    'Texas So': 'Texas Southern', 'UAB': 'Alabama-Birmingham',
+    'UCF': 'Central Florida', 'UConn': 'Connecticut',
+    'UIW': 'Incarnate Word', 'UL Lafayette': 'Louisiana-Lafayette',
+    'UL Monroe': 'Louisiana-Monroe', 'UMBC': 'Maryland-Baltimore County',
+    'UMKC': 'Kansas City', 'UNCG': 'UNC Greensboro',
+    'UNCW': 'UNC Wilmington', 'URI': 'Rhode Island',
+    'USC': 'Southern California', 'UT Martin': 'Tennessee-Martin',
+    'UTEP': 'UTEP', 'UTRGV': 'UT Rio Grande Valley', 'UTSA': 'UT San Antonio',
+    'Utah St': 'Utah St.', 'Utah State': 'Utah St.',
+    'VCU': 'VCU', 'VMI': 'VMI', 'W Carolina': 'Western Carolina',
+    'W Michigan': 'Western Michigan', 'Weber State': 'Weber St.',
+    'Wichita St': 'Wichita St.', 'Wichita State': 'Wichita St.',
+    'Winston-Salem State': 'Winston-Salem St.', 'Youngstown State': 'Youngstown St.',
+    'Nebraska-Omaha': 'Nebraska Omaha', 'Queens NC': 'Queens',
+    'Queens University': 'Queens', 'Purdue Fort Wayne': 'Fort Wayne',
+    'Mississippi Valley State': 'Mississippi Valley State',
+    'Gardner Webb': 'Gardner Webb',
+}
+
+
+def norm_team(name):
+    """
+    Normalize an OddsAPI team name to the canonical DB name.
+    Step 1: strip trailing nickname ("Iowa State Cyclones" -> "Iowa State")
+    Step 2: run through CBBD_TO_TORVIK ("Iowa State" -> "Iowa St.")
+    """
+    if not name:
+        return name
+    s = str(name).strip()
+
+    # Strip one-word nickname
+    parts = s.rsplit(' ', 1)
     if len(parts) == 2 and parts[1] in ODDS_NICKNAMES:
-        name = parts[0]
-    parts3 = name.rsplit(' ', 2)
+        s = parts[0].strip()
+
+    # Strip two-word nickname
+    parts3 = s.rsplit(' ', 2)
     if len(parts3) == 3:
         two_word = parts3[1] + ' ' + parts3[2]
         if two_word in ODDS_NICKNAMES:
-            name = parts3[0]
-    return name.strip()
+            s = parts3[0].strip()
+
+    # Map to canonical DB name
+    return CBBD_TO_TORVIK.get(s, s)
 
 
 def setup_db(conn):
@@ -127,12 +255,23 @@ def setup_db(conn):
 
 
 def get_already_scraped(conn):
-    """Return set of (game_date, home_team, away_team) already in line_movement."""
+    """
+    Return set of (game_date, home_team, away_team) already attempted.
+    Includes rows with NULL values — we don't want to re-attempt dates
+    where OddsAPI returned nothing (saves credits).
+    """
     rows = conn.execute("""
         SELECT game_date, home_team, away_team FROM line_movement
-        WHERE spread_open IS NOT NULL OR spread_close IS NOT NULL
     """).fetchall()
     return {(r[0], r[1], r[2]) for r in rows}
+
+
+def get_already_scraped_dates(conn):
+    """Return set of game_dates already attempted (to skip entire dates)."""
+    rows = conn.execute("""
+        SELECT DISTINCT game_date FROM line_movement
+    """).fetchall()
+    return {r[0] for r in rows}
 
 
 def fetch_snapshot(target_dt_utc):
@@ -176,8 +315,8 @@ def parse_snapshot(games_data):
     for game in games_data:
         home_raw = game.get('home_team', '')
         away_raw = game.get('away_team', '')
-        home = strip_nickname(home_raw)
-        away = strip_nickname(away_raw)
+        home = norm_team(home_raw)
+        away = norm_team(away_raw)
 
         spread = ml_home = ml_away = total = None
         for book in game.get('bookmakers', []):
@@ -209,7 +348,7 @@ def parse_snapshot(games_data):
     return result
 
 
-def get_game_dates(conn, season=None):
+def get_game_dates(conn, season=None, start_season=2021):
     """
     Get all unique game dates from the games table, optionally filtered by season.
     Returns list of (game_date_str, list of (home_team, away_team)) per date.
@@ -217,17 +356,15 @@ def get_game_dates(conn, season=None):
     if season:
         rows = conn.execute("""
             SELECT game_date, home_team, away_team
-            FROM games
-            WHERE season = ?
+            FROM games WHERE season = ?
             ORDER BY game_date
         """, (season,)).fetchall()
     else:
         rows = conn.execute("""
             SELECT game_date, home_team, away_team
-            FROM games
-            WHERE season >= 2020
+            FROM games WHERE season >= ?
             ORDER BY game_date
-        """).fetchall()
+        """, (start_season,)).fetchall()
 
     # Group by date
     from collections import defaultdict
@@ -332,12 +469,84 @@ def scrape_date(conn, game_date_str, games_on_date, already_scraped, credits_use
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--season', type=int, default=None,
-                   help='Scrape only this season (e.g. 2025). Default: all seasons 2020+')
+                   help='Scrape only this season (e.g. 2025). Default: 2021+')
+    p.add_argument('--start-season', type=int, default=2021,
+                   help='First season to scrape (default: 2021)')
     p.add_argument('--resume', action='store_true',
-                   help='Skip dates already in line_movement table')
+                   help='Skip dates already attempted in line_movement table')
+    p.add_argument('--wipe', action='store_true',
+                   help='Drop and recreate line_movement table before scraping')
     p.add_argument('--dry-run', action='store_true',
                    help='Show what would be scraped without making API calls')
     return p.parse_args()
+
+
+if __name__ == '__main__':
+    args = parse_args()
+
+    if not ODDS_KEY:
+        print("ERROR: ODDS_API_KEY not set in .env")
+        exit(1)
+
+    print("=" * 60)
+    print("NCAAB — Historical Line Movement Scraper")
+    print("=" * 60)
+    print(f"  Cost: ~30 credits per date | Bookmaker: DraftKings")
+    print(f"  Markets: spreads, totals, h2h | Start season: {args.start_season}")
+
+    conn = sqlite3.connect(DB)
+
+    if args.wipe:
+        print("  Wiping line_movement table...")
+        conn.execute("DROP TABLE IF EXISTS line_movement")
+        conn.commit()
+
+    setup_db(conn)
+
+    already_scraped_dates = get_already_scraped_dates(conn) if args.resume else set()
+    if args.resume:
+        print(f"  Resume mode: {len(already_scraped_dates)} dates already attempted")
+
+    dates = get_game_dates(conn, season=args.season, start_season=args.start_season)
+    # Filter out already-scraped dates in resume mode
+    if args.resume:
+        dates = [(d, g) for d, g in dates if d not in already_scraped_dates]
+
+    print(f"  Dates to process: {len(dates)}")
+    print(f"  Estimated credits: ~{len(dates) * 60:,}")
+    print()
+
+    if args.dry_run:
+        print("DRY RUN — no API calls made.")
+        for d, games in dates[:5]:
+            print(f"  {d}: {len(games)} games")
+        print(f"  ... ({len(dates)} total dates)")
+        conn.close()
+        exit(0)
+
+    total_inserted = 0
+    credits_used   = 0
+    already_scraped = get_already_scraped(conn)
+
+    for i, (game_date_str, games_on_date) in enumerate(dates):
+        inserted, credits_used = scrape_date(
+            conn, game_date_str, games_on_date, already_scraped, credits_used
+        )
+        total_inserted += inserted
+
+        if (i + 1) % 10 == 0 or i == 0:
+            print(f"  [{i+1}/{len(dates)}] {game_date_str} | "
+                  f"+{inserted} rows | total={total_inserted} | "
+                  f"credits used={credits_used}")
+
+    conn.close()
+
+    print()
+    print("=" * 60)
+    print(f"Done. {total_inserted:,} games scraped.")
+    print(f"Total credits used: ~{credits_used:,}")
+    print()
+    print("Next: python scripts/05b_backtest_totals_combos.py")
 
 
 if __name__ == '__main__':
