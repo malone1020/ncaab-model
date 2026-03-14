@@ -1068,7 +1068,8 @@ if __name__ == '__main__':
     parser.add_argument('--ev',             type=float, default=EV_MIN)
     parser.add_argument('--demo',           action='store_true', help='Use demo games for testing')
     parser.add_argument('--update-results', action='store_true', help='Fetch final scores and mark bet outcomes')
-    parser.add_argument('--kelly', type=float, default=None, help='Kelly fraction override (default: 0.25 quarter-Kelly). Try 0.5 for half-Kelly.')
+    parser.add_argument('--kelly',          type=float, default=None, help='Kelly fraction (default: 0.25)')
+    parser.add_argument('--replay',         action='store_true', help='Load lines from DB instead of OddsAPI (for past dates)')
     args = parser.parse_args()
 
     target_date = date.fromisoformat(args.date) if args.date else date.today()
@@ -1117,6 +1118,28 @@ if __name__ == '__main__':
              'total': 148.5, 'ml_home': -240, 'ml_away': 198, 'game_time': datetime.now()},
         ]
         print(f"  DEMO MODE: {len(games)} games")
+        injury_map = {}
+    elif args.replay:
+        # Load lines from DB for a past date (no OddsAPI call)
+        _conn = sqlite3.connect(DB)
+        _rows = _conn.execute("""
+            SELECT gl.home_team, gl.away_team, gl.spread, gl.over_under,
+                   gl.home_moneyline, gl.away_moneyline, g.neutral_site
+            FROM game_lines gl
+            JOIN games g ON gl.game_date=g.game_date
+                AND gl.home_team=g.home_team AND gl.away_team=g.away_team
+            WHERE gl.game_date=? AND gl.spread IS NOT NULL
+        """, (str(target_date),)).fetchall()
+        _conn.close()
+        games = []
+        for home, away, spread, total, ml_home, ml_away, neutral in _rows:
+            games.append({
+                'home_team': home, 'away_team': away,
+                'spread': spread, 'total': total,
+                'ml_home': ml_home, 'ml_away': ml_away,
+                'game_time': datetime.now(),
+            })
+        print(f"  REPLAY MODE: {len(games)} games from DB for {target_date}")
         injury_map = {}
     else:
         odds_data = fetch_todays_lines(target_date)
