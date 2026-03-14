@@ -1,255 +1,319 @@
 """
 03e_pull_referees.py
 ====================
-Pulls referee assignments from CollegeBasketballData.com (CBBD) API.
-Builds referee profile features (foul rate, pace impact, home bias).
+Scrape referee assignments + foul stats for all NCAAB games using CBBpy
+(ESPN data). Uses cbbd_id (ESPN game ID) already stored in the games table.
 
-Tables created/updated:
-  referee_game    — one row per game, with ref IDs and names
-  referee_profiles — one row per ref per season, with computed stats
+Single get_game() call per game returns:
+  - game_info: referee_1, referee_2, referee_3 (names)
+  - boxscore:  pf + fta per team (for foul rate profiles)
 
-Run: python scripts/03e_pull_referees.py
+Populates two tables:
+  referee_game     -- which refs officiated each game (up to 3 per game)
+  referee_profiles -- per-ref season foul tendency profiles
+
+Ref profiles computed from box scores:
+  avg_fouls_per_game  -- avg total fouls called (home + away)
+  home_foul_bias      -- home_fouls / total_fouls (>0.5 = more calls on home)
+  ftr_home_avg        -- home FTA / home FGA
+  ftr_away_avg        -- away FTA / away FGA
+
+Runtime: ~1-2 sec/game via CBBpy
+Run one season at a time: --season 2025 (~3k games ~1-2 hrs)
+
+Run: python scripts/03e_pull_referees.py --season 2025
+     python scripts/03e_pull_referees.py --season 2024 --resume
+     python scripts/03e_pull_referees.py --resume
+     python scripts/03e_pull_referees.py --profiles-only
 """
 
-import sqlite3, os, time, requests
-from collections import defaultdict
+import sqlite3, os, time, argparse, warnings
+from datetime import datetime, timezone
+import pandas as pd
+import numpy as np
 
-ROOT    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB      = os.path.join(ROOT, 'data', 'basketball.db')
-API_KEY = 'CKa1XBg0pAjKxElmF5YONntM9J/8tANHWnXN/MBXiX8pUJdaSBe2bYbOVkVtfZzM'  # CBBD key
-BASE    = 'https://api.collegebasketballdata.com'
+try:
+    import cbbpy.mens_scraper as cbb
+except ImportError:
+    print("ERROR: cbbpy not installed. Run: pip install cbbpy")
+    exit(1)
 
-HEADERS = {'Authorization': f'Bearer {API_KEY}', 'Accept': 'application/json'}
+warnings.filterwarnings('ignore')
 
-def init_tables(conn):
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DB   = os.path.join(ROOT, 'data', 'basketball.db')
+
+REQUEST_DELAY = 1.5
+BATCH_COMMIT  = 50
+
+
+def setup_db(conn):
     conn.execute("""
         CREATE TABLE IF NOT EXISTS referee_game (
-            game_id     TEXT,
             game_date   TEXT,
-            season      INTEGER,
             home_team   TEXT,
             away_team   TEXT,
-            ref1_id     TEXT,
-            ref2_id     TEXT,
-            ref3_id     TEXT,
-            ref1_name   TEXT,
-            ref2_name   TEXT,
-            ref3_name   TEXT,
-            PRIMARY KEY (game_id)
+            ref_1       TEXT,
+            ref_2       TEXT,
+            ref_3       TEXT,
+            home_fouls  REAL,
+            away_fouls  REAL,
+            home_fta    REAL,
+            away_fta    REAL,
+            home_fga    REAL,
+            away_fga    REAL,
+            scraped_at  TEXT,
+            PRIMARY KEY (game_date, home_team, away_team)
         )
     """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS referee_profiles (
-            ref_id          TEXT,
-            ref_name        TEXT,
-            season          INTEGER,
-            games           INTEGER,
-            avg_fouls_per_game   REAL,
-            avg_pace_impact      REAL,   -- avg possessions vs expected
-            home_foul_pct        REAL,   -- home fouls / total fouls
-            home_foul_bias       REAL,   -- home_foul_pct - 0.5 (positive = home bias)
-            ftr_home_avg         REAL,   -- avg home FT rate in their games
-            ftr_away_avg         REAL,   -- avg away FT rate in their games
-            PRIMARY KEY (ref_id, season)
+            ref_name            TEXT,
+            season              INTEGER,
+            games               INTEGER,
+            avg_fouls_per_game  REAL,
+            home_foul_bias      REAL,
+            ftr_home_avg        REAL,
+            ftr_away_avg        REAL,
+            computed_at         TEXT,
+            PRIMARY KEY (ref_name, season)
         )
     """)
     conn.commit()
 
 
-def pull_refs_for_season(conn, season):
-    """Pull all referee assignments for a season."""
-    url = f"{BASE}/games/referees"
-    params = {'season': season, 'seasonType': 'regular'}
-
-    try:
-        r = requests.get(url, headers=HEADERS, params=params, timeout=30)
-        if r.status_code == 404:
-            print(f"    {season}: no referee data (404)")
-            return 0
-        if r.status_code != 200:
-            print(f"    {season}: HTTP {r.status_code}")
-            return 0
-        data = r.json()
-    except Exception as e:
-        print(f"    {season}: error — {e}")
-        return 0
-
-    if not data:
-        return 0
-
-    rows = []
-    for g in data:
-        refs = g.get('officials', []) or []
-        # Pad to 3
-        while len(refs) < 3:
-            refs.append({})
-        game_id   = str(g.get('id', ''))
-        game_date = g.get('startDate', '')[:10]
-        home      = g.get('homeTeam', '')
-        away      = g.get('awayTeam', '')
-
-        rows.append((
-            game_id, game_date, season, home, away,
-            str(refs[0].get('id', '')), str(refs[1].get('id', '')), str(refs[2].get('id', '')),
-            refs[0].get('name', ''),  refs[1].get('name', ''),  refs[2].get('name', ''),
-        ))
-
-    conn.executemany("""
-        INSERT OR REPLACE INTO referee_game VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    """, rows)
-    conn.commit()
-    return len(rows)
+def get_already_scraped(conn):
+    rows = conn.execute(
+        "SELECT game_date, home_team, away_team FROM referee_game"
+    ).fetchall()
+    return {(r[0], r[1], r[2]) for r in rows}
 
 
-def pull_tournament_refs(conn, season):
-    """Also pull postseason referee data."""
-    url = f"{BASE}/games/referees"
-    params = {'season': season, 'seasonType': 'postseason'}
-    try:
-        r = requests.get(url, headers=HEADERS, params=params, timeout=30)
-        if r.status_code != 200:
-            return 0
-        data = r.json()
-    except:
-        return 0
-
-    if not data:
-        return 0
-
-    rows = []
-    for g in data:
-        refs = g.get('officials', []) or []
-        while len(refs) < 3:
-            refs.append({})
-        game_id   = str(g.get('id', ''))
-        game_date = g.get('startDate', '')[:10]
-        home      = g.get('homeTeam', '')
-        away      = g.get('awayTeam', '')
-        rows.append((
-            game_id, game_date, season, home, away,
-            str(refs[0].get('id', '')), str(refs[1].get('id', '')), str(refs[2].get('id', '')),
-            refs[0].get('name', ''),  refs[1].get('name', ''),  refs[2].get('name', ''),
-        ))
-
-    conn.executemany("INSERT OR REPLACE INTO referee_game VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
-    conn.commit()
-    return len(rows)
-
-
-def build_ref_profiles(conn):
-    """
-    Build per-referee per-season profiles from referee_game + game_team_stats.
-    Computes: avg fouls/game, home foul bias, FT rate differentials.
-    """
-    print("  Building referee profiles...")
-
-    # Get all referee appearances with game stats
-    rows = conn.execute("""
-        SELECT rg.ref1_name, rg.ref1_id, rg.season, rg.game_date,
-               rg.home_team, rg.away_team
-        FROM referee_game rg
-        WHERE rg.ref1_id != '' AND rg.ref1_id IS NOT NULL
-        UNION ALL
-        SELECT rg.ref2_name, rg.ref2_id, rg.season, rg.game_date,
-               rg.home_team, rg.away_team
-        FROM referee_game rg
-        WHERE rg.ref2_id != '' AND rg.ref2_id IS NOT NULL
-        UNION ALL
-        SELECT rg.ref3_name, rg.ref3_id, rg.season, rg.game_date,
-               rg.home_team, rg.away_team
-        FROM referee_game rg
-        WHERE rg.ref3_id != '' AND rg.ref3_id IS NOT NULL
+def load_games(conn, season=None):
+    if season:
+        return conn.execute("""
+            SELECT game_date, home_team, away_team, cbbd_id, season
+            FROM games WHERE season = ? AND cbbd_id IS NOT NULL
+            ORDER BY game_date
+        """, (season,)).fetchall()
+    return conn.execute("""
+        SELECT game_date, home_team, away_team, cbbd_id, season
+        FROM games WHERE cbbd_id IS NOT NULL
+        ORDER BY game_date
     """).fetchall()
 
-    # Get game team stats for foul/FTR data
-    stats = conn.execute("""
-        SELECT g.game_date, g.home_team, g.away_team,
-               gts_h.fouls as home_fouls, gts_a.fouls as away_fouls,
-               gts_h.ft_att as home_fta, gts_a.ft_att as away_fta,
-               gts_h.fg_att as home_fga, gts_a.fg_att as away_fga
-        FROM games g
-        LEFT JOIN game_team_stats gts_h ON gts_h.game_id = g.id AND gts_h.team = g.home_team
-        LEFT JOIN game_team_stats gts_a ON gts_a.game_id = g.id AND gts_a.team = g.away_team
-    """).fetchall()
 
-    stats_idx = {}
-    for gd, ht, at, hf, af, hfta, afta, hfga, afga in stats:
-        stats_idx[(gd, ht, at)] = {
-            'home_fouls': hf or 0, 'away_fouls': af or 0,
-            'home_fta': hfta or 0, 'away_fta': afta or 0,
-            'home_fga': hfga or 0, 'away_fga': afga or 0,
+def scrape_game(cbbd_id):
+    """
+    Use CBBpy to get game_info (refs) + boxscore (fouls/FTA/FGA).
+    Returns dict or None on failure.
+    """
+    try:
+        info, box, _ = cbb.get_game(cbbd_id, info=True, box=True, pbp=False)
+
+        result = {
+            'ref_1': None, 'ref_2': None, 'ref_3': None,
+            'home_fouls': None, 'away_fouls': None,
+            'home_fta': None,   'away_fta': None,
+            'home_fga': None,   'away_fga': None,
         }
 
-    # Aggregate by ref × season
-    ref_data = defaultdict(lambda: {
-        'name': '', 'games': 0, 'total_fouls': 0,
-        'home_fouls': 0, 'away_fouls': 0,
-        'home_fta': 0, 'away_fta': 0,
-        'home_fga': 0, 'away_fga': 0,
-    })
+        # Refs from game_info
+        if info is not None and not info.empty:
+            row = info.iloc[0]
+            for k, col in [('ref_1','referee_1'),('ref_2','referee_2'),('ref_3','referee_3')]:
+                val = row.get(col, '')
+                result[k] = str(val).strip() if val and str(val).strip() else None
 
-    for ref_name, ref_id, season, gd, ht, at in rows:
-        key = (ref_id, season)
-        s = stats_idx.get((gd, ht, at), {})
-        d = ref_data[key]
-        d['name'] = ref_name
-        d['games'] += 1
-        hf = s.get('home_fouls', 0) or 0
-        af = s.get('away_fouls', 0) or 0
-        d['total_fouls']  += hf + af
-        d['home_fouls']   += hf
-        d['away_fouls']   += af
-        d['home_fta']     += s.get('home_fta', 0) or 0
-        d['away_fta']     += s.get('away_fta', 0) or 0
-        d['home_fga']     += s.get('home_fga', 0) or 0
-        d['away_fga']     += s.get('away_fga', 0) or 0
+        # Fouls/FTA/FGA from boxscore
+        if box is not None and not box.empty and 'team_name' in box.columns:
+            home_name = info.iloc[0]['home_team'] if (info is not None and not info.empty) else ''
+            teams = box['team_name'].dropna().unique()
+            for team in teams:
+                tdf = box[box['team_name'] == team]
+                pf_sum  = pd.to_numeric(tdf['pf'],  errors='coerce').sum()
+                fta_sum = pd.to_numeric(tdf['fta'], errors='coerce').sum()
+                fga_sum = pd.to_numeric(tdf['fga'], errors='coerce').sum()
+                # Match home vs away
+                is_home = (home_name.lower() in str(team).lower() or
+                           str(team).lower() in home_name.lower())
+                side = 'home' if is_home else 'away'
+                if pf_sum  > 0: result[f'{side}_fouls'] = float(pf_sum)
+                if fta_sum >= 0: result[f'{side}_fta']  = float(fta_sum)
+                if fga_sum > 0: result[f'{side}_fga']  = float(fga_sum)
 
-    profile_rows = []
-    for (ref_id, season), d in ref_data.items():
-        if d['games'] < 5:
-            continue
-        total_f = d['total_fouls']
-        home_foul_pct  = d['home_fouls'] / total_f if total_f > 0 else 0.5
-        home_foul_bias = home_foul_pct - 0.5
-        avg_fpg        = total_f / d['games']
-        ftr_home = d['home_fta'] / d['home_fga'] if d['home_fga'] > 0 else None
-        ftr_away = d['away_fta'] / d['away_fga'] if d['away_fga'] > 0 else None
-        profile_rows.append((
-            ref_id, d['name'], season, d['games'],
-            avg_fpg, None, home_foul_pct, home_foul_bias,
-            ftr_home, ftr_away,
-        ))
+        return result
+    except Exception:
+        return None
+
+
+def build_referee_profiles(conn):
+    print("\nBuilding referee profiles...")
+    rg = pd.read_sql("SELECT * FROM referee_game", conn)
+    if rg.empty:
+        print("  No data yet")
+        return
+
+    games_meta = pd.read_sql(
+        "SELECT game_date, home_team, away_team, season FROM games", conn
+    )
+    rg = rg.merge(games_meta, on=['game_date','home_team','away_team'], how='left')
+    rg = rg[rg['ref_1'].notna() | rg['ref_2'].notna() | rg['ref_3'].notna()]
+    print(f"  Games with ref data: {len(rg):,}")
+
+    rows = []
+    for _, row in rg.iterrows():
+        season = row.get('season')
+        if pd.isna(season): continue
+        for col in ['ref_1','ref_2','ref_3']:
+            name = row.get(col)
+            if name and pd.notna(name) and str(name).strip():
+                rows.append({
+                    'ref_name':   str(name).strip(),
+                    'season':     int(season),
+                    'home_fouls': row.get('home_fouls'),
+                    'away_fouls': row.get('away_fouls'),
+                    'home_fta':   row.get('home_fta'),
+                    'away_fta':   row.get('away_fta'),
+                    'home_fga':   row.get('home_fga'),
+                    'away_fga':   row.get('away_fga'),
+                })
+
+    if not rows:
+        print("  No assignments found")
+        return
+
+    df = pd.DataFrame(rows)
+    profiles = []
+    now = datetime.now(timezone.utc).isoformat()
+
+    for (ref_name, season), grp in df.groupby(['ref_name','season']):
+        hf = pd.to_numeric(grp['home_fouls'], errors='coerce')
+        af = pd.to_numeric(grp['away_fouls'], errors='coerce')
+        tf = hf.fillna(0) + af.fillna(0)
+        ht = pd.to_numeric(grp['home_fta'], errors='coerce')
+        at = pd.to_numeric(grp['away_fta'], errors='coerce')
+        hg = pd.to_numeric(grp['home_fga'], errors='coerce')
+        ag = pd.to_numeric(grp['away_fga'], errors='coerce')
+
+        avg_fpg = float(tf.mean()) if tf.sum() > 0 else None
+
+        valid_bias = (hf + af).dropna()
+        valid_bias = valid_bias[valid_bias > 0]
+        home_bias = float((hf[valid_bias.index] / valid_bias).mean()) if len(valid_bias) > 0 else None
+
+        vh = hg[hg > 0]
+        ftr_h = float((ht[vh.index] / vh).mean()) if len(vh) > 0 else None
+        va = ag[ag > 0]
+        ftr_a = float((at[va.index] / va).mean()) if len(va) > 0 else None
+
+        profiles.append((ref_name, season, len(grp), avg_fpg, home_bias, ftr_h, ftr_a, now))
 
     conn.execute("DELETE FROM referee_profiles")
-    conn.executemany("INSERT OR REPLACE INTO referee_profiles VALUES (?,?,?,?,?,?,?,?,?,?)", profile_rows)
+    conn.executemany("""
+        INSERT OR REPLACE INTO referee_profiles
+        (ref_name, season, games, avg_fouls_per_game,
+         home_foul_bias, ftr_home_avg, ftr_away_avg, computed_at)
+        VALUES (?,?,?,?,?,?,?,?)
+    """, profiles)
     conn.commit()
-    print(f"  ✅ {len(profile_rows):,} referee profiles built")
-    return len(profile_rows)
+
+    n_fouls = sum(1 for p in profiles if p[3] is not None)
+    unique_refs = df['ref_name'].nunique()
+    print(f"  {len(profiles):,} ref-season profiles | {unique_refs:,} unique refs")
+    print(f"  Profiles with foul data: {n_fouls:,}/{len(profiles):,}")
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument('--season', type=int, default=None)
+    p.add_argument('--resume', action='store_true')
+    p.add_argument('--wipe', action='store_true')
+    p.add_argument('--profiles-only', action='store_true')
+    p.add_argument('--delay', type=float, default=REQUEST_DELAY)
+    return p.parse_args()
 
 
 if __name__ == '__main__':
+    args = parse_args()
+
+    print("=" * 60)
+    print("NCAAB -- Referee Scraper (CBBpy / ESPN)")
+    print("=" * 60)
+
     conn = sqlite3.connect(DB)
-    init_tables(conn)
 
-    existing = conn.execute("SELECT COUNT(*) FROM referee_game").fetchone()[0]
-    print(f"  Existing referee_game rows: {existing:,}")
+    if args.wipe:
+        print("  Wiping referee tables...")
+        conn.execute("DROP TABLE IF EXISTS referee_game")
+        conn.execute("DROP TABLE IF EXISTS referee_profiles")
+        conn.commit()
 
-    seasons = range(2016, 2026)
-    total = 0
-    print(f"\nPulling referee data for seasons {min(seasons)}-{max(seasons)}...")
-    for s in seasons:
-        n_reg  = pull_refs_for_season(conn, s)
-        n_post = pull_tournament_refs(conn, s)
-        n      = n_reg + n_post
-        total += n
-        print(f"  {s}: {n:,} games ({n_reg} regular + {n_post} postseason)")
-        time.sleep(0.5)
+    setup_db(conn)
 
-    print(f"\n  Total referee_game rows: {total:,}")
+    if args.profiles_only:
+        build_referee_profiles(conn)
+        conn.close()
+        exit(0)
 
-    # Build profiles
-    n_profiles = build_ref_profiles(conn)
+    all_games = load_games(conn, season=args.season)
+    already   = get_already_scraped(conn) if args.resume else set()
+    pending   = [(gd,ht,at,gid,s) for gd,ht,at,gid,s in all_games
+                 if (gd,ht,at) not in already]
 
+    print(f"  Games to scrape: {len(pending):,}")
+    print(f"  Est. time: ~{len(pending)*args.delay/3600:.1f} hrs at {args.delay}s/req")
+    print(f"  Tip: use --season 2025 first to validate")
+    print()
+
+    found_refs = found_fouls = failed = 0
+    now = datetime.now(timezone.utc).isoformat()
+
+    for i, (game_date, home_team, away_team, cbbd_id, season) in enumerate(pending):
+        result = scrape_game(cbbd_id)
+        time.sleep(args.delay)
+
+        if result is None:
+            failed += 1
+            conn.execute("""
+                INSERT OR IGNORE INTO referee_game
+                (game_date, home_team, away_team, scraped_at) VALUES (?,?,?,?)
+            """, (game_date, home_team, away_team, now))
+        else:
+            if result['ref_1']: found_refs  += 1
+            if result['home_fouls']: found_fouls += 1
+            conn.execute("""
+                INSERT OR REPLACE INTO referee_game
+                (game_date, home_team, away_team,
+                 ref_1, ref_2, ref_3,
+                 home_fouls, away_fouls,
+                 home_fta, away_fta, home_fga, away_fga,
+                 scraped_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                game_date, home_team, away_team,
+                result['ref_1'], result['ref_2'], result['ref_3'],
+                result['home_fouls'], result['away_fouls'],
+                result['home_fta'], result['away_fta'],
+                result['home_fga'], result['away_fga'],
+                now,
+            ))
+
+        if (i+1) % BATCH_COMMIT == 0:
+            conn.commit()
+        if (i+1) % 50 == 0 or i == 0:
+            print(f"  [{i+1}/{len(pending)}] {game_date} | "
+                  f"refs={found_refs} fouls={found_fouls} failed={failed}")
+
+    conn.commit()
+    print()
+    print("=" * 60)
+    print(f"Done. refs={found_refs} | fouls={found_fouls} | failed={failed}")
+
+    build_referee_profiles(conn)
     conn.close()
-    print(f"\n✅ Done: {total:,} game-ref assignments, {n_profiles:,} ref profiles")
-    print("Next: wire ref features into 04_build_features.py")
+
+    print()
+    print("Next: python scripts/04_build_features.py")
+    print("      python scripts/08_train_totals_model.py "
+          "--combo \"CONTEXT+TVD+KPD+RECENCY+REFS+TRAVEL\"")
