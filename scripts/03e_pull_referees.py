@@ -103,41 +103,62 @@ def load_games(conn, season=None):
     """).fetchall()
 
 
-def scrape_game(cbbd_id):
+def scrape_game(cbbd_id, timeout=20):
     """
     Use CBBpy to get game_info (refs) + boxscore (fouls/FTA/FGA).
-    Returns dict or None on failure.
+    Returns dict or None on failure. Timeout prevents hanging on ESPN.
     """
-    try:
-        info, box, _ = cbb.get_game(cbbd_id, info=True, box=True, pbp=False)
+    import threading
 
-        result = {
-            'ref_1': None, 'ref_2': None, 'ref_3': None,
-            'home_fouls': None, 'away_fouls': None,
-            'home_fta': None,   'away_fta': None,
-            'home_fga': None,   'away_fga': None,
-        }
+    result_container = [None]
+    exception_container = [None]
 
-        # Refs from game_info
-        if info is not None and not info.empty:
-            row = info.iloc[0]
-            for k, col in [('ref_1','referee_1'),('ref_2','referee_2'),('ref_3','referee_3')]:
-                val = row.get(col, '')
-                result[k] = str(val).strip() if val and str(val).strip() else None
+    def _fetch():
+        try:
+            info, box, _ = cbb.get_game(cbbd_id, info=True, box=True, pbp=False)
+            result_container[0] = (info, box)
+        except Exception as e:
+            exception_container[0] = e
 
-        # Fouls/FTA/FGA from boxscore
-        if box is not None and not box.empty and 'team_name' in box.columns:
-            home_name = info.iloc[0]['home_team'] if (info is not None and not info.empty) else ''
-            teams = box['team_name'].dropna().unique()
-            for team in teams:
-                tdf = box[box['team_name'] == team]
-                pf_sum  = pd.to_numeric(tdf['pf'],  errors='coerce').sum()
-                fta_sum = pd.to_numeric(tdf['fta'], errors='coerce').sum()
-                fga_sum = pd.to_numeric(tdf['fga'], errors='coerce').sum()
-                # Match home vs away
-                is_home = (home_name.lower() in str(team).lower() or
-                           str(team).lower() in home_name.lower())
-                side = 'home' if is_home else 'away'
+    t = threading.Thread(target=_fetch, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+
+    if t.is_alive():
+        # Timed out — ESPN not responding for this game
+        return None
+
+    if exception_container[0] is not None or result_container[0] is None:
+        return None
+
+    info, box = result_container[0]
+
+    result = {
+        'ref_1': None, 'ref_2': None, 'ref_3': None,
+        'home_fouls': None, 'away_fouls': None,
+        'home_fta': None,   'away_fta': None,
+        'home_fga': None,   'away_fga': None,
+    }
+
+    # Refs from game_info
+    if info is not None and not info.empty:
+        row = info.iloc[0]
+        for k, col in [('ref_1','referee_1'),('ref_2','referee_2'),('ref_3','referee_3')]:
+            val = row.get(col, '')
+            result[k] = str(val).strip() if val and str(val).strip() else None
+
+    # Fouls/FTA/FGA from boxscore
+    if box is not None and not box.empty and 'team_name' in box.columns:
+        home_name = info.iloc[0]['home_team'] if (info is not None and not info.empty) else ''
+        teams = box['team_name'].dropna().unique()
+        for team in teams:
+            tdf = box[box['team_name'] == team]
+            pf_sum  = pd.to_numeric(tdf['pf'],  errors='coerce').sum()
+            fta_sum = pd.to_numeric(tdf['fta'], errors='coerce').sum()
+            fga_sum = pd.to_numeric(tdf['fga'], errors='coerce').sum()
+            is_home = (home_name.lower() in str(team).lower() or
+                       str(team).lower() in home_name.lower())
+            side = 'home' if is_home else 'away'
                 if pf_sum  > 0: result[f'{side}_fouls'] = float(pf_sum)
                 if fta_sum >= 0: result[f'{side}_fta']  = float(fta_sum)
                 if fga_sum > 0: result[f'{side}_fga']  = float(fga_sum)
@@ -301,7 +322,7 @@ if __name__ == '__main__':
 
         if (i+1) % BATCH_COMMIT == 0:
             conn.commit()
-        if (i+1) % 50 == 0 or i == 0:
+        if (i+1) % 10 == 0 or i == 0:
             print(f"  [{i+1}/{len(pending)}] {game_date} | "
                   f"refs={found_refs} fouls={found_fouls} failed={failed}")
 
