@@ -271,16 +271,49 @@ def store_line_movement(games, target_date, conn, norm_fn):
 
 def fetch_torvik_schedule(target_date):
     """
-    Fetch today's schedule from Torvik to get conf_game and neutral_site flags.
-    Torvik cell format: "3 Arizona vs 7 Iowa St. B12-T ESPN"
+    Get conf_game and neutral_site flags for today's games.
+    Primary: DB lookup from games table (reliable, no scraping needed).
+    Fallback: Torvik schedule page (JS-rendered, often returns nothing).
     Returns dict keyed by frozenset of normalized team names.
     """
+    result = {}
+
+    # Primary: look up from games table — already has conf_game + neutral_site
+    try:
+        import importlib.util
+        path = os.path.join(ROOT, 'scripts', '04_build_features.py')
+        spec = importlib.util.spec_from_file_location("bfm", path)
+        mod  = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        norm_db = mod.norm
+
+        db_conn = sqlite3.connect(DB)
+        rows = db_conn.execute("""
+            SELECT home_team, away_team, conf_game, neutral_site, tournament
+            FROM games WHERE game_date = ?
+        """, (str(target_date),)).fetchall()
+        db_conn.close()
+
+        for home, away, conf_game, neutral_site, tournament in rows:
+            key = frozenset([norm_db(home), norm_db(away)])
+            conf_code = 'CONF-T' if tournament == 'conf_tournament' else ''
+            result[key] = {
+                'conf_game':    int(conf_game or 0),
+                'neutral_site': int(neutral_site or 0),
+                'conf_code':    conf_code,
+            }
+        if result:
+            return result
+    except Exception:
+        pass
+
+    # Fallback: Torvik schedule page (JS-rendered, usually returns nothing)
     import re
     url = f"https://barttorvik.com/schedule.php?date={target_date.strftime('%Y%m%d')}"
     try:
         r = requests.get(url, timeout=10)
         if r.status_code != 200:
-            return {}
+            return result
         from html.parser import HTMLParser
         class ScheduleParser(HTMLParser):
             def __init__(self):
@@ -297,50 +330,30 @@ def fetch_torvik_schedule(target_date):
                     self._in_td = False
                     self._row.append(''.join(self._cells).strip())
                 if tag == 'tr' and self._row:
-                    # Find the cell containing ' vs ' — matchup + conf are in same cell
-                    # Format: "3 Arizona vs 7 Iowa St. B12-T ESPN"
                     for cell in self._row:
                         if ' vs ' not in cell:
                             continue
-                        # Split on ' vs '
                         parts = cell.split(' vs ', 1)
-                        left  = parts[0].strip()   # "3 Arizona"
-                        right = parts[1].strip()   # "7 Iowa St. B12-T ESPN"
-                        # Strip leading rank number from left team
-                        t1 = re.sub(r'^\d+\s+', '', left).strip()
-                        # Right side has: rank, team name, conf code, network
-                        # Conf code looks like B12-T, SEC-T, ACC-T, B10-T, Non-con etc.
-                        # Match pattern: optional rank, team name, then CONF-SUFFIX
-                        right_no_rank = re.sub(r'^\d+\s+', '', right)
-                        # Extract conf code (all-caps with hyphen, e.g. B12-T, SEC-T)
-                        conf_match = re.search(r'([A-Z][A-Z0-9]*-[A-Z])', right_no_rank)
+                        t1 = re.sub(r'^\d+\s+', '', parts[0]).strip()
+                        right_no_rank = re.sub(r'^\d+\s+', '', parts[1])
+                        conf_match = re.search(r'([A-Z][A-Z0-9]*-[A-Z])', right_no_rank)
                         conf_code = conf_match.group(1) if conf_match else ''
-                        # Strip conf code and anything after from team name
-                        if conf_code:
-                            t2 = right_no_rank[:right_no_rank.index(conf_code)].strip()
-                        else:
-                            # No conf code — strip trailing network name (all caps)
-                            t2 = re.sub(r'\s+[A-Z0-9]+\s*$', '', right_no_rank).strip()
-                        # Determine conf_game and neutral_site from conf code
+                        t2 = right_no_rank[:right_no_rank.index(conf_code)].strip() if conf_code else re.sub(r'\s+[A-Z0-9]+\s*$', '', right_no_rank).strip()
                         is_conf    = 1 if conf_code and 'Non' not in conf_code else 0
                         is_neutral = 1 if conf_code.endswith('-T') or conf_code.endswith('-N') else 0
                         if t1 and t2:
-                            key = frozenset([t1, t2])
-                            self.games[key] = {
-                                'conf_game':    is_conf,
-                                'neutral_site': is_neutral,
-                                'conf_code':    conf_code,
+                            self.games[frozenset([t1, t2])] = {
+                                'conf_game': is_conf, 'neutral_site': is_neutral, 'conf_code': conf_code
                             }
                         break
             def handle_data(self, data):
                 if self._in_td: self._cells.append(data)
-
         parser = ScheduleParser()
         parser.feed(r.text)
-        return parser.games
+        return parser.games if parser.games else result
     except Exception as e:
         print(f"  Warning: could not fetch Torvik schedule: {e}")
-        return {}
+        return result
 
 
 def fetch_todays_refs(games, target_date, norm_fn):
