@@ -188,7 +188,7 @@ def migrate_tables(conn):
 # 1. TORVIK SEASON FINALS
 # ─────────────────────────────────────────────
 
-def pull_torvik_season(seasons=range(2016, 2026)):
+def pull_torvik_season(seasons=range(2016, 2027)):
     conn = db()
     cur = conn.cursor()
     total = 0
@@ -270,7 +270,7 @@ def snapshot_dates(season):
         d += timedelta(days=7)
     return out
 
-def pull_torvik_daily(seasons=range(2016, 2026)):
+def pull_torvik_daily(seasons=range(2016, 2027)):
     conn = db()
     cur = conn.cursor()
     total = 0
@@ -338,7 +338,7 @@ def pull_torvik_daily(seasons=range(2016, 2026)):
 # 3. TORVIK GAME PREDICTIONS
 # ─────────────────────────────────────────────
 
-def pull_torvik_game_preds(seasons=range(2016, 2026)):
+def pull_torvik_game_preds(seasons=range(2016, 2027)):
     conn = db()
     cur = conn.cursor()
     total = 0
@@ -447,7 +447,7 @@ def parse_rank_delta(val):
         return None
 
 
-def pull_haslametrics(seasons=range(2016, 2026)):
+def pull_haslametrics(seasons=range(2016, 2027)):
     conn = db()
     cur = conn.cursor()
     total = 0
@@ -643,16 +643,16 @@ if __name__ == '__main__':
     print("[SCHEMA] Tables created/verified.")
 
     print("\n[1/5] Torvik season finals...")
-    pull_torvik_season(seasons=range(2016, 2026))
+    pull_torvik_season(seasons=range(2016, 2027))
 
     print("\n[2/5] Torvik daily time machine...")
-    pull_torvik_daily(seasons=range(2016, 2026))
+    pull_torvik_daily(seasons=range(2016, 2027))
 
     print("\n[3/5] Torvik game predictions...")
-    pull_torvik_game_preds(seasons=range(2016, 2026))
+    pull_torvik_game_preds(seasons=range(2016, 2027))
 
     print("\n[4/5] Haslametrics (XML source: ratings{YY}.xml)...")
-    pull_haslametrics(seasons=range(2016, 2026))
+    pull_haslametrics(seasons=range(2016, 2027))
 
     print("\n[5/5] cbb.csv supplement...")
     load_cbb_csv()
