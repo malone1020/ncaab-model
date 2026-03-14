@@ -32,6 +32,7 @@ os.makedirs(OUT_DIR, exist_ok=True)
 FEATURE_GROUPS = {
     'CONTEXT': [
         'neutral_site', 'conf_game', 'hca_adj', 'rest_diff',
+        'is_conf_tournament', 'is_ncaa_tournament',
     ],
     'TVS': [
         'h_tvs_adj_em','h_tvs_adj_o','h_tvs_adj_d','h_tvs_adj_t','h_tvs_barthag',
