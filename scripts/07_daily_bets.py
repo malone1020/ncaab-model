@@ -1283,6 +1283,7 @@ if __name__ == '__main__':
     parser.add_argument('--kelly',          type=float, default=None, help='Kelly fraction (default: 0.25)')
     parser.add_argument('--replay',         action='store_true', help='Load lines from DB instead of OddsAPI (for past dates)')
     parser.add_argument('--no-totals',      action='store_true', help='Skip totals model (use when game_features_v2 lacks current season data)')
+    parser.add_argument('--read-only',      action='store_true', help='Skip all DB writes (line movement, refs) — use when rebuild is running')
     args = parser.parse_args()
 
     target_date = date.fromisoformat(args.date) if args.date else date.today()
@@ -1290,6 +1291,7 @@ if __name__ == '__main__':
     ev_thresh   = args.ev
     kelly_frac  = args.kelly  # None = use default KELLY_FRAC (0.25)
     no_totals   = args.no_totals
+    read_only   = args.read_only
 
     # --update-results: fetch scores and mark outcomes for a saved bet card
     if args.update_results:
@@ -1368,7 +1370,10 @@ if __name__ == '__main__':
             print(f"  Line movement: {n_stored} games logged")
 
         # Fetch today's referee assignments from ESPN
-        n_refs = fetch_todays_refs(games, target_date, norm_fn)
+        if read_only:
+            n_refs = 0
+        else:
+            n_refs = fetch_todays_refs(games, target_date, norm_fn)
         if n_refs > 0:
             print(f"  Refs: {n_refs} games scraped")
 
