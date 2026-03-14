@@ -119,9 +119,18 @@ def norm_team(name):
     return CBBD_TO_TORVIK.get(s, s)
 
 
-def get_tournament_dates(conn, resume=False):
-    """Get all distinct game dates for tournament games."""
-    if resume:
+def get_tournament_dates(conn, resume=False, all_dates=False):
+    """Get tournament game dates to process."""
+    if all_dates:
+        # Get ALL tournament dates regardless of existing lines
+        rows = conn.execute("""
+            SELECT DISTINCT game_date FROM games
+            WHERE tournament IN ('conf_tournament', 'ncaa_tournament')
+              AND season >= 2021
+            ORDER BY game_date
+        """).fetchall()
+    elif resume:
+        # Only dates where some tournament games still lack lines
         rows = conn.execute("""
             SELECT DISTINCT g.game_date
             FROM games g
@@ -242,7 +251,9 @@ def upsert_game_line(conn, game_date, home_team, away_team,
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--resume',  action='store_true',
-                   help='Skip dates where all tournament games already have lines')
+                   help='Only scrape dates where some games still lack lines')
+    p.add_argument('--all',     action='store_true',
+                   help='Re-scrape all dates (re-match with improved name matching)')
     p.add_argument('--dry-run', action='store_true',
                    help='Show what would be scraped without API calls')
     return p.parse_args()
@@ -262,7 +273,7 @@ if __name__ == '__main__':
     print(f"  Cost: ~30 credits per date")
 
     conn = sqlite3.connect(DB)
-    dates = get_tournament_dates(conn, resume=args.resume)
+    dates = get_tournament_dates(conn, resume=args.resume, all_dates=args.all)
 
     print(f"  Tournament dates to scrape: {len(dates)}")
     print(f"  Estimated credits: ~{len(dates) * 30:,}")
@@ -309,13 +320,42 @@ if __name__ == '__main__':
 
         matched = 0
         for home_db, away_db, home_score, away_score, season, tournament in our_games:
+            line = None
+
+            # Try 1: exact match (DB name == normalized ESPN name)
             line = parsed.get((home_db, away_db))
-            # Try fuzzy match if exact fails
+
+            # Try 2: flipped orientation
             if not line:
+                flipped = parsed.get((away_db, home_db))
+                if flipped:
+                    # Swap ml_home/ml_away since orientation is flipped
+                    line = {
+                        'spread': -flipped['spread'] if flipped.get('spread') is not None else None,
+                        'total':  flipped.get('total'),
+                        'ml_home': flipped.get('ml_away'),
+                        'ml_away': flipped.get('ml_home'),
+                    }
+
+            # Try 3: partial substring match (both orientations)
+            if not line:
+                h_low = home_db.lower()
+                a_low = away_db.lower()
                 for (ph, pa), v in parsed.items():
-                    if (home_db.lower() in ph.lower() or ph.lower() in home_db.lower()) and \
-                       (away_db.lower() in pa.lower() or pa.lower() in away_db.lower()):
+                    ph_low, pa_low = ph.lower(), pa.lower()
+                    if ((h_low in ph_low or ph_low in h_low) and
+                        (a_low in pa_low or pa_low in a_low)):
                         line = v
+                        break
+                    # flipped
+                    if ((h_low in pa_low or pa_low in h_low) and
+                        (a_low in ph_low or ph_low in a_low)):
+                        line = {
+                            'spread': -v['spread'] if v.get('spread') is not None else None,
+                            'total':  v.get('total'),
+                            'ml_home': v.get('ml_away'),
+                            'ml_away': v.get('ml_home'),
+                        }
                         break
 
             if line and (line.get('spread') is not None or line.get('total') is not None):
