@@ -1363,8 +1363,8 @@ if __name__ == '__main__':
         print(f"  DraftKings: {len(games)} games on {target_date}")
 
         # Store opening/closing lines for future LINE_MOVE feature use
-        if games:
-            lm_conn = sqlite3.connect(DB)
+        if games and not read_only:
+            lm_conn = sqlite3.connect(DB, timeout=60)
             n_stored = store_line_movement(games, target_date, lm_conn, norm_fn)
             lm_conn.close()
             print(f"  Line movement: {n_stored} games logged")
