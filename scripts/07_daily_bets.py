@@ -472,7 +472,86 @@ def fetch_todays_refs(games, target_date, norm_fn):
         return 0
 
 
-def build_features(home_raw, away_raw, spread, target_date, conn, feature_cols, norm_fn, schedule_info=None):
+def fetch_injury_flags(games, norm_fn):
+    """
+    Fetch injury reports for today's teams from ESPN.
+    Returns dict keyed by norm_fn(team_name) ->
+        {'has_injury': bool, 'players': [{'name', 'status', 'position'}]}
+    Only flags meaningful injuries: Out or Doubtful status.
+    """
+    ESPN_INJURIES = ("https://site.api.espn.com/apis/site/v2/sports/basketball/"
+                     "mens-college-basketball/teams/{team_id}/injuries")
+    ESPN_TEAMS    = ("https://site.api.espn.com/apis/site/v2/sports/basketball/"
+                     "mens-college-basketball/teams")
+    HEADERS = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json',
+    }
+    FLAGGED_STATUSES = {'out', 'doubtful', 'questionable'}
+
+    # Get all teams playing today
+    today_teams = set()
+    for g in games:
+        today_teams.add(norm_fn(g['home_team']))
+        today_teams.add(norm_fn(g['away_team']))
+
+    injury_map = {}
+
+    try:
+        # Step 1: get ESPN team IDs for today's teams
+        r = requests.get(ESPN_TEAMS, params={'limit': 500}, headers=HEADERS, timeout=15)
+        if r.status_code != 200:
+            return {}
+
+        team_id_map = {}  # norm_name -> espn_team_id
+        for team in r.json().get('sports', [{}])[0].get('leagues', [{}])[0].get('teams', []):
+            t = team.get('team', {})
+            raw_name = t.get('displayName', '')
+            # Strip nickname
+            parts = raw_name.rsplit(' ', 1)
+            if len(parts) == 2 and parts[1] in ODDS_NICKNAMES:
+                raw_name = parts[0]
+            parts3 = raw_name.rsplit(' ', 2)
+            if len(parts3) == 3:
+                two = parts3[1] + ' ' + parts3[2]
+                if two in ODDS_NICKNAMES:
+                    raw_name = parts3[0]
+            norm_name = norm_fn(raw_name.strip())
+            if norm_name in today_teams:
+                team_id_map[norm_name] = t.get('id')
+
+        # Step 2: fetch injuries for each matched team
+        for norm_name, team_id in team_id_map.items():
+            if not team_id:
+                continue
+            try:
+                ri = requests.get(
+                    ESPN_INJURIES.format(team_id=team_id),
+                    headers=HEADERS, timeout=10
+                )
+                if ri.status_code != 200:
+                    continue
+                data = ri.json()
+                injured = []
+                for item in data.get('injuries', []):
+                    status = item.get('status', '').lower()
+                    if any(s in status for s in FLAGGED_STATUSES):
+                        athlete = item.get('athlete', {})
+                        injured.append({
+                            'name':     athlete.get('displayName', '?'),
+                            'position': athlete.get('position', {}).get('abbreviation', '?'),
+                            'status':   item.get('status', '?'),
+                        })
+                if injured:
+                    injury_map[norm_name] = injured
+                time.sleep(0.2)
+            except Exception:
+                continue
+
+    except Exception:
+        pass
+
+    return injury_map
     home = norm_fn(home_raw)
     away = norm_fn(away_raw)
     gd_str = str(target_date)
@@ -657,6 +736,7 @@ def print_card(bets, target_date, bankroll, ev_thresh):
         line_short, bet_desc = format_bet_line(b)
         if len(bet_desc) > 23: bet_desc = bet_desc[:20] + "..."
         fm = " ★" if b.get('has_fanmatch') else "  "
+        inj = " ⚠" if b.get('injury_flag') else ""
         edge = b.get('edge_pts', 0)
         # Format game time as HH:MM ET
         try:
@@ -1037,6 +1117,7 @@ if __name__ == '__main__':
              'total': 148.5, 'ml_home': -240, 'ml_away': 198, 'game_time': datetime.now()},
         ]
         print(f"  DEMO MODE: {len(games)} games")
+        injury_map = {}
     else:
         odds_data = fetch_todays_lines(target_date)
         games = parse_lines(odds_data, target_date)
@@ -1053,6 +1134,16 @@ if __name__ == '__main__':
         n_refs = fetch_todays_refs(games, target_date, norm_fn)
         if n_refs > 0:
             print(f"  Refs: {n_refs} games scraped")
+
+        # Fetch injury reports
+        injury_map = fetch_injury_flags(games, norm_fn)
+        if injury_map:
+            print(f"  Injuries: {len(injury_map)} teams with flagged players")
+            for team, players in injury_map.items():
+                for p in players:
+                    print(f"    ⚠  {team}: {p['name']} ({p['position']}) — {p['status']}")
+        else:
+            injury_map = {}
 
     if not games:
         print("No games found. Use --demo for testing.")
@@ -1078,6 +1169,15 @@ if __name__ == '__main__':
 
         label = f"{norm_fn(g['away_team'])} @ {norm_fn(g['home_team'])}"
         if len(label) > 39: label = label[:36] + "..."
+
+        # Injury warning flag
+        h_norm = norm_fn(g['home_team'])
+        a_norm = norm_fn(g['away_team'])
+        h_injured = injury_map.get(h_norm, [])
+        a_injured = injury_map.get(a_norm, [])
+        inj_flag = ''
+        if h_injured or a_injured:
+            inj_flag = ' ⚠'
 
         # ── SPREAD ────────────────────────────────────────────────────────
         if SPREAD_LO <= abs(spread) <= SPREAD_HI:
@@ -1115,6 +1215,8 @@ if __name__ == '__main__':
                             'bet_side': spread_side, 'bet_size': sz,
                             'bet_type': 'spread', 'game_time': str(g['game_time']),
                             'has_fanmatch': bool(row.get('has_kp_fanmatch')),
+                            'injury_flag': bool(h_injured or a_injured),
+                            'injury_detail': [(h_norm, h_injured), (a_norm, a_injured)],
                         })
 
                 # ── MONEYLINE (derived from spread model) ─────────────────
