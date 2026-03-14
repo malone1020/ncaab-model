@@ -532,17 +532,255 @@ def print_card(bets, target_date, bankroll, ev_thresh):
     print("="*94)
 
 
+def fetch_scores(target_date):
+    """
+    Fetch final scores from OddsAPI for games on target_date.
+    Cost: 2 credits per call. Returns completed games only.
+    """
+    if not ODDS_KEY:
+        print("  ERROR: ODDS_API_KEY not set")
+        return []
+    url = "https://api.the-odds-api.com/v4/sports/basketball_ncaab/scores/"
+    params = {'apiKey': ODDS_KEY, 'daysFrom': 3}
+    try:
+        r = requests.get(url, params=params, timeout=15)
+        if r.status_code != 200:
+            print(f"  OddsAPI scores HTTP {r.status_code}")
+            return []
+        data = r.json()
+        remaining = r.headers.get('X-Requests-Remaining', '?')
+        print(f"  OddsAPI scores: {len(data)} events | remaining: {remaining}")
+        # Filter to completed games on target_date
+        results = []
+        for g in data:
+            if not g.get('completed'):
+                continue
+            gdt = datetime.fromisoformat(g['commence_time'].replace('Z', '+00:00'))
+            if gdt.date() != target_date:
+                continue
+            scores = {s['name']: int(s['score']) for s in (g.get('scores') or [])}
+            if len(scores) == 2:
+                results.append({
+                    'home_team': g['home_team'],
+                    'away_team': g['away_team'],
+                    'scores':    scores,
+                })
+        return results
+    except Exception as e:
+        print(f"  OddsAPI scores error: {e}")
+        return []
+
+
+def update_results(target_date, norm_fn):
+    """
+    Load saved bets for target_date, fetch final scores,
+    mark each bet won/lost, print P&L summary, save results JSON.
+    """
+    bets_path    = os.path.join(OUT_DIR, f'bets_{target_date}.json')
+    results_path = os.path.join(OUT_DIR, f'results_{target_date}.json')
+
+    if not os.path.exists(bets_path):
+        print(f"  No bets file found: {bets_path}")
+        print(f"  Run without --update-results first to generate today's card.")
+        return
+
+    with open(bets_path) as f:
+        bets = json.load(f)
+
+    if not bets:
+        print("  No bets to update.")
+        return
+
+    print(f"  Loaded {len(bets)} bets from {bets_path}")
+    scores = fetch_scores(target_date)
+
+    if not scores:
+        print("  No completed scores available yet — try again after games finish.")
+        return
+
+    # Build scores lookup keyed by (home_norm, away_norm)
+    scores_map = {}
+    for g in scores:
+        h_norm = norm_fn(g['home_team'])
+        a_norm = norm_fn(g['away_team'])
+        scores_map[(h_norm, a_norm)] = g['scores']
+        scores_map[(a_norm, h_norm)] = g['scores']  # both directions
+
+    results   = []
+    total_wagered = 0
+    total_pnl     = 0
+    wins = losses = pushes = pending = 0
+
+    PAYOUT_FIXED = 100 / 110
+
+    for b in bets:
+        h = b.get('home_norm', norm_fn(b.get('home_team', '')))
+        a = b.get('away_norm', norm_fn(b.get('away_team', '')))
+        game_scores = scores_map.get((h, a))
+
+        outcome = b.copy()
+
+        if game_scores is None:
+            outcome['result'] = 'pending'
+            outcome['pnl']    = 0
+            pending += 1
+            results.append(outcome)
+            continue
+
+        # Get home/away scores
+        home_raw = b.get('home_team', h)
+        away_raw = b.get('away_team', a)
+        h_score = game_scores.get(home_raw) or game_scores.get(h)
+        a_score = game_scores.get(away_raw) or game_scores.get(a)
+
+        # Try all keys if still None
+        if h_score is None or a_score is None:
+            for name, score in game_scores.items():
+                n = norm_fn(name)
+                if n == h: h_score = score
+                if n == a: a_score = score
+
+        if h_score is None or a_score is None:
+            outcome['result'] = 'pending'
+            outcome['pnl']    = 0
+            pending += 1
+            results.append(outcome)
+            continue
+
+        margin      = h_score - a_score   # positive = home won
+        bet_type    = b.get('bet_type', 'spread')
+        bet_side    = b.get('bet_side', 'home')
+        spread      = b.get('spread', 0) or 0
+        total_line  = b.get('total', 0)   or 0
+        bet_size    = b.get('bet_size', 0)
+        ml_home     = b.get('ml_home')
+        ml_away     = b.get('ml_away')
+
+        won = False
+        if bet_type == 'spread':
+            if bet_side == 'home':
+                won = (margin + spread) > 0   # home covers
+            else:
+                won = (margin + spread) < 0   # away covers
+            payout_rate = PAYOUT_FIXED
+
+        elif bet_type == 'total':
+            actual_total = h_score + a_score
+            if bet_side == 'over':
+                won = actual_total > total_line
+            else:
+                won = actual_total < total_line
+            payout_rate = PAYOUT_FIXED
+
+        elif bet_type == 'ml':
+            if bet_side == 'home':
+                won = margin > 0
+                ml  = ml_home
+            else:
+                won = margin < 0
+                ml  = ml_away
+            ml = float(ml) if ml else -110
+            payout_rate = (ml / 100) if ml > 0 else (100 / abs(ml))
+
+        else:
+            won = False
+            payout_rate = PAYOUT_FIXED
+
+        # Check push (spread/total lands exactly on line)
+        is_push = False
+        if bet_type == 'spread' and (margin + spread) == 0:
+            is_push = True
+        elif bet_type == 'total' and (h_score + a_score) == total_line:
+            is_push = True
+
+        if is_push:
+            pnl = 0
+            outcome['result'] = 'push'
+            pushes += 1
+        elif won:
+            pnl = bet_size * payout_rate
+            outcome['result'] = 'win'
+            wins += 1
+        else:
+            pnl = -bet_size
+            outcome['result'] = 'loss'
+            losses += 1
+
+        outcome['home_score']  = h_score
+        outcome['away_score']  = a_score
+        outcome['actual_margin'] = margin
+        outcome['pnl']           = round(pnl, 2)
+        total_wagered += bet_size
+        total_pnl     += pnl
+        results.append(outcome)
+
+    # Print summary
+    settled = wins + losses + pushes
+    print()
+    print("=" * 60)
+    print(f"  RESULTS — {target_date}")
+    print("=" * 60)
+    print(f"  {wins}W / {losses}L / {pushes}P  ({pending} pending)")
+    if settled > 0:
+        wr = wins / settled
+        roi = total_pnl / total_wagered if total_wagered > 0 else 0
+        print(f"  Win rate: {wr:.1%} | P&L: ${total_pnl:+,.2f} | ROI: {roi:+.1%}")
+        print(f"  Total wagered: ${total_wagered:,.0f}")
+    print()
+
+    # Per-bet breakdown
+    print(f"  {'MATCHUP':<30} {'TYPE':<8} {'SIDE':<20} {'SIZE':>6} {'RESULT':<7} {'P&L':>8}")
+    print("  " + "-"*82)
+    for r in sorted(results, key=lambda x: x.get('result','') == 'pending'):
+        matchup = f"{r.get('away_norm','')} @ {r.get('home_norm','')}"
+        if len(matchup) > 29: matchup = matchup[:26] + "..."
+        btype   = r.get('bet_type','').upper()
+        side    = r.get('bet_side','')
+        size    = r.get('bet_size', 0)
+        result  = r.get('result', 'pending').upper()
+        pnl     = r.get('pnl', 0)
+        score   = f"({r.get('home_score','?')}-{r.get('away_score','?')})" if r.get('home_score') is not None else ''
+        print(f"  {matchup:<30} {btype:<8} {side:<20} ${size:>5,.0f} {result:<7} ${pnl:>+8.2f} {score}")
+    print("=" * 60)
+
+    # Save results
+    with open(results_path, 'w') as f:
+        json.dump({
+            'date':          str(target_date),
+            'wins':          wins,
+            'losses':        losses,
+            'pushes':        pushes,
+            'pending':       pending,
+            'total_wagered': round(total_wagered, 2),
+            'total_pnl':     round(total_pnl, 2),
+            'bets':          results,
+        }, f, indent=2, default=str)
+    print(f"\nSaved: {results_path}")
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--date',     type=str,   help='YYYY-MM-DD (default: today)')
-    parser.add_argument('--bankroll', type=float, default=BANKROLL)
-    parser.add_argument('--ev',       type=float, default=EV_MIN)
-    parser.add_argument('--demo',     action='store_true', help='Use demo games for testing')
+    parser.add_argument('--date',           type=str,  help='YYYY-MM-DD (default: today)')
+    parser.add_argument('--bankroll',       type=float, default=BANKROLL)
+    parser.add_argument('--ev',             type=float, default=EV_MIN)
+    parser.add_argument('--demo',           action='store_true', help='Use demo games for testing')
+    parser.add_argument('--update-results', action='store_true', help='Fetch final scores and mark bet outcomes')
     args = parser.parse_args()
 
     target_date = date.fromisoformat(args.date) if args.date else date.today()
     bankroll    = args.bankroll
     ev_thresh   = args.ev
+
+    # --update-results: fetch scores and mark outcomes for a saved bet card
+    if args.update_results:
+        print(f"\nNCAAB Results Update — {target_date}")
+        print("=" * 50)
+        try:
+            norm_fn = get_norm_func()
+        except Exception:
+            norm_fn = lambda x: x
+        update_results(target_date, norm_fn)
+        sys.exit(0)
 
     print(f"\nNCAAB Daily Bets — {target_date}")
     print("="*50)
