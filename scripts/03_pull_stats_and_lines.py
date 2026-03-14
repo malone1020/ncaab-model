@@ -332,7 +332,8 @@ def main():
     print(f"Seasons  : {START_SEASON}–{END_SEASON}")
     print()
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=60)
+    conn.execute("PRAGMA journal_mode=WAL")
     ensure_schema(conn)
     print()
 

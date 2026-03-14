@@ -303,7 +303,8 @@ if __name__ == '__main__':
     print("NCAAB -- Referee Scraper (ESPN JSON API, 2-phase)")
     print("=" * 60)
 
-    conn = sqlite3.connect(DB)
+    conn = sqlite3.connect(DB, timeout=60)
+    conn.execute("PRAGMA journal_mode=WAL")
 
     if args.wipe:
         print("  Wiping referee tables...")

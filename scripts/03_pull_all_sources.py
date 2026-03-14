@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS torvik_game_preds (
 
 def db():
     os.makedirs(os.path.dirname(DB), exist_ok=True)
-    conn = sqlite3.connect(DB)
+    conn = sqlite3.connect(DB, timeout=60)
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 

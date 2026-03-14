@@ -272,7 +272,8 @@ if __name__ == '__main__':
     print(f"  Markets: spreads, totals, h2h | Bookmaker: DraftKings")
     print(f"  Cost: ~30 credits per date")
 
-    conn = sqlite3.connect(DB)
+    conn = sqlite3.connect(DB, timeout=60)
+    conn.execute("PRAGMA journal_mode=WAL")
     dates = get_tournament_dates(conn, resume=args.resume, all_dates=args.all)
 
     print(f"  Tournament dates to scrape: {len(dates)}")

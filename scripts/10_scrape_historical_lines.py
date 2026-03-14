@@ -494,7 +494,8 @@ if __name__ == '__main__':
     print(f"  Cost: ~30 credits per date | Bookmaker: DraftKings")
     print(f"  Markets: spreads, totals, h2h | Start season: {args.start_season}")
 
-    conn = sqlite3.connect(DB)
+    conn = sqlite3.connect(DB, timeout=60)
+    conn.execute("PRAGMA journal_mode=WAL")
 
     if args.wipe:
         print("  Wiping line_movement table...")
@@ -562,7 +563,8 @@ if __name__ == '__main__':
     print(f"  Cost estimate: ~30 credits per date (open + close snapshots)")
     print(f"  Bookmaker: DraftKings | Markets: spreads, totals, h2h")
 
-    conn = sqlite3.connect(DB)
+    conn = sqlite3.connect(DB, timeout=60)
+    conn.execute("PRAGMA journal_mode=WAL")
     setup_db(conn)
 
     already_scraped = get_already_scraped(conn) if args.resume else set()
