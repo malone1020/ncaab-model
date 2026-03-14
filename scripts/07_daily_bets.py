@@ -1084,6 +1084,23 @@ if __name__ == '__main__':
                 Ximp_t = pd.DataFrame(totals_imputer.transform(X_t), columns=totals_features)
                 p_over = float(totals_model.predict_proba(Ximp_t)[0][1])
 
+                # ── Tournament pace adjustments ──────────────────────────
+                # Based on empirical analysis (analyze_tournament_pace.py):
+                # Conf tournament: DK underprices totals by ~+2.0 pts residual
+                #   → over rate 56.4% vs 49.3% reg season (N=94 games)
+                #   → boost P(over) conservatively using +1.5pt adjustment
+                # NCAA tournament: residual -2.16 pts but over rate 48.9%
+                #   → not meaningfully different from reg season, skip
+                # Adjustment: +1.5pt edge on ~141pt total with ~10pt std
+                #   → P boost ≈ norm.cdf(1.5/10) - 0.5 ≈ +0.060
+                is_conf_tourn = bool(row_t.get('is_conf_tournament', 0))
+                if is_conf_tourn:
+                    from scipy.stats import norm as _norm
+                    CONF_TOURN_ADJ_PTS = 1.5   # conservative half of +2.0 residual
+                    TOTAL_STD          = 10.0   # approx std of total scoring
+                    p_boost = _norm.cdf(CONF_TOURN_ADJ_PTS / TOTAL_STD) - 0.5
+                    p_over  = float(np.clip(p_over + p_boost, 0.01, 0.99))
+
                 ev_over  = compute_ev(p_over)
                 ev_under = compute_ev(1 - p_over)
                 best_tot_ev = max(ev_over, ev_under)
