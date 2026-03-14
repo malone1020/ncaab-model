@@ -1445,6 +1445,14 @@ if __name__ == '__main__':
                     sz = kelly_size(best_spread_ev, bankroll, kelly_frac)
                     if sz >= 10:
                         sprd_display = spread if spread_side == 'home' else -spread
+                        # Sanity check: if ML and spread disagree on who's favored, flip spread
+                        # This handles neutral-site games where OddsAPI home/away is arbitrary
+                        team_ml = ml_home if spread_side == 'home' else ml_away
+                        if team_ml is not None:
+                            ml_says_fav = team_ml < 0
+                            sprd_says_fav = sprd_display < 0
+                            if ml_says_fav != sprd_says_fav and abs(sprd_display) > 0.5:
+                                sprd_display = -sprd_display
                         bets.append({
                             'home_team': g['home_team'], 'away_team': g['away_team'],
                             'home_norm': hn, 'away_norm': an,
