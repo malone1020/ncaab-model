@@ -159,13 +159,11 @@ def scrape_game(cbbd_id, timeout=20):
             is_home = (home_name.lower() in str(team).lower() or
                        str(team).lower() in home_name.lower())
             side = 'home' if is_home else 'away'
-                if pf_sum  > 0: result[f'{side}_fouls'] = float(pf_sum)
-                if fta_sum >= 0: result[f'{side}_fta']  = float(fta_sum)
-                if fga_sum > 0: result[f'{side}_fga']  = float(fga_sum)
+            if pf_sum  > 0:  result[f'{side}_fouls'] = float(pf_sum)
+            if fta_sum >= 0: result[f'{side}_fta']   = float(fta_sum)
+            if fga_sum > 0:  result[f'{side}_fga']   = float(fga_sum)
 
-        return result
-    except Exception:
-        return None
+    return result
 
 
 def build_referee_profiles(conn):
