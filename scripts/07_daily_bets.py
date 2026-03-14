@@ -1220,11 +1220,16 @@ if __name__ == '__main__':
                         })
 
                 # ── MONEYLINE (derived from spread model) ─────────────────
-                # ML odds filter: only bet when line is between +200 and -400
-                # Avoids big underdogs (+300/+400/+500) where market has
-                # non-model info (injuries, lineup changes) and liquidity is thin.
-                ML_MIN = -400   # won't bet bigger favorites than -400
-                ML_MAX = +200   # won't bet underdogs longer than +200
+                # ML odds filter based on walk-forward backtest (11_backtest_ml_model.py):
+                #   Big favorites (<-200):      ROI +6.7%, WR 76.9% ✓
+                #   Mid favorites (-200 to -100): ROI -2.0%         ✗
+                #   Near pick-ems (-100 to +100): ROI -10%          ✗
+                #   Underdogs (+100 to +200):    ROI +8.2%, WR 44.3% ✓
+                # Only bet in the two profitable zones.
+                ML_FAV_MAX  = -200  # big favorites only (more negative = bigger fav)
+                ML_FAV_MIN  = -400  # cap at -400 (liquidity/non-model info risk)
+                ML_DOG_MIN  = +100  # underdogs only (not near pick-ems)
+                ML_DOG_MAX  = +200  # cap at +200
                 if ml_home is not None and ml_away is not None:
                     p_win = p_cover_to_p_win(p, spread, ml_sigma)
                     ev_ml_h = compute_ml_ev(p_win,       ml_home)
@@ -1236,8 +1241,10 @@ if __name__ == '__main__':
                     else:
                         ml_side, p_ml, best_ml_ev, ml_odds = 'away', 1-p_win, ev_ml_a, ml_away
 
-                    # Apply odds filter
-                    ml_in_range = ML_MIN <= ml_odds <= ML_MAX if ml_odds < 0 else ml_odds <= ML_MAX
+                    # Apply two-zone odds filter
+                    is_big_fav = (ml_odds < 0) and (ML_FAV_MIN <= ml_odds <= ML_FAV_MAX)
+                    is_dog     = (ml_odds > 0) and (ML_DOG_MIN <= ml_odds <= ML_DOG_MAX)
+                    ml_in_range = is_big_fav or is_dog
                     edge_ml = (p_ml - 0.5238) * 100
 
                     qual_ml = best_ml_ev >= ev_thresh and ml_in_range

@@ -33,8 +33,11 @@ PARAMS_F = os.path.join(ROOT, 'models', 'ml_params.json')
 
 PAYOUT   = 100 / 110
 EV_MIN   = 0.03
-ML_MIN   = -400
-ML_MAX   = +200
+# Two-zone filter based on backtest findings
+ML_FAV_MIN = -400
+ML_FAV_MAX = -200  # big favorites only
+ML_DOG_MIN = +100  # underdogs only
+ML_DOG_MAX = +200
 SPREAD_MIN = 0.5
 SPREAD_MAX = 9.0
 
@@ -55,7 +58,9 @@ def p_cover_to_p_win(p_cover, spread, sigma):
 def ml_in_range(ml):
     if ml is None: return False
     ml = float(ml)
-    return ML_MIN <= ml if ml < 0 else ml <= ML_MAX
+    is_big_fav = (ml < 0) and (ML_FAV_MIN <= ml <= ML_FAV_MAX)
+    is_dog     = (ml > 0) and (ML_DOG_MIN <= ml <= ML_DOG_MAX)
+    return is_big_fav or is_dog
 
 
 def load_data():
@@ -130,7 +135,7 @@ if __name__ == '__main__':
     test_seasons = [s for s in seasons if seasons.index(s) >= 4]
 
     print(f"\n--- Walk-Forward ML Backtest ---")
-    print(f"  ML odds filter: {ML_MIN} to +{ML_MAX} | EV threshold: {EV_MIN:.0%}")
+    print(f"  ML odds filter: big favs ({ML_FAV_MIN} to {ML_FAV_MAX}) + dogs (+{ML_DOG_MIN} to +{ML_DOG_MAX}) | EV: {EV_MIN:.0%}")
     print()
     print(f"  {'Season':<8} {'Train':>7} {'Test':>7} {'Bets':>6} "
           f"{'WR':>7} {'ROI':>8} {'AvgEV':>8} {'AvgOdds':>9}")
