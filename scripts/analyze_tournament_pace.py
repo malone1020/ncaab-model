@@ -1,9 +1,12 @@
 """
 analyze_tournament_pace.py
 ==========================
-Measure actual vs model-predicted totals during conference tournaments
-and NCAA tournament vs regular season. Quantifies the pace inflation
-we need to account for in 07_daily_bets.py.
+Measure actual scoring in conference tournaments and NCAA tournament
+vs regular season to quantify pace inflation for totals adjustments.
+
+NOTE: tournament games have no DK lines in game_lines, so we measure
+actual total scoring lift vs regular season. We can compare to the
+DK line for regular season games to validate the approach.
 
 Run: python scripts/analyze_tournament_pace.py
 """
@@ -19,153 +22,115 @@ DB   = os.path.join(ROOT, 'data', 'basketball.db')
 
 
 def classify_game_type(row):
-    """Classify game using tournament column directly."""
     tournament = str(row.get('tournament') or '').lower()
     if 'ncaa' in tournament:
         return 'ncaa_tournament'
     if 'conf' in tournament:
         return 'conf_tournament'
-    if 'postseason' in tournament or row.get('season_type') == 'postseason':
+    if 'postseason' in tournament or str(row.get('season_type') or '') == 'postseason':
         return 'other_postseason'
     return 'regular_season'
 
 
 if __name__ == '__main__':
     print("=" * 65)
-    print("NCAAB — Tournament Pace Analysis")
+    print("NCAAB - Tournament Pace Analysis")
     print("=" * 65)
 
     conn = sqlite3.connect(DB)
 
-    # Load games with scores and lines
+    # Load ALL games with scores (LEFT JOIN so tournament games without lines are included)
     df = pd.read_sql("""
         SELECT g.game_date, g.season, g.home_team, g.away_team,
                g.neutral_site, g.conf_game, g.tournament, g.season_type,
-               gl.home_score, gl.away_score, gl.over_under,
-               gl.went_over, gl.home_covered
+               g.home_score, g.away_score,
+               gl.over_under, gl.went_over
         FROM games g
-        JOIN game_lines gl ON g.game_date = gl.game_date
+        LEFT JOIN game_lines gl
+            ON g.game_date = gl.game_date
             AND g.home_team = gl.home_team
             AND g.away_team = gl.away_team
-        WHERE gl.home_score IS NOT NULL
-          AND gl.away_score IS NOT NULL
-          AND gl.over_under IS NOT NULL
+        WHERE g.home_score IS NOT NULL
+          AND g.away_score IS NOT NULL
           AND g.season >= 2019
         ORDER BY g.game_date
     """, conn)
     conn.close()
 
-    print(f"\nLoaded {len(df):,} games with scores + lines (2019-2025)")
+    df['actual_total'] = df['home_score'] + df['away_score']
+    df['has_line']     = df['over_under'].notna()
+    df['ou_margin']    = df['actual_total'] - df['over_under']
+    df['game_type']    = df.apply(classify_game_type, axis=1)
+    df['month']        = pd.to_datetime(df['game_date']).dt.month
 
-    # Compute actual total and over/under margin
-    df['actual_total']  = df['home_score'] + df['away_score']
-    df['ou_margin']     = df['actual_total'] - df['over_under']  # positive = went over
-    df['game_type']     = df.apply(classify_game_type, axis=1)
+    print(f"\nLoaded {len(df):,} games (2019-2025)")
+    print("\nGame type distribution:")
+    for gt, n in df['game_type'].value_counts().items():
+        lined = df[df['game_type']==gt]['has_line'].sum()
+        print(f"  {gt:<22} {n:>5} games  ({lined} with DK lines)")
 
-    # Extract month for seasonality
-    df['month'] = pd.to_datetime(df['game_date']).dt.month
-    df['is_march'] = df['month'].isin([3, 4])
-
-    print(f"\nGame type distribution:")
-    print(df['game_type'].value_counts().to_string())
-
-    # ── Core analysis: actual totals by game type ──────────────────────────
+    # ── Actual total scoring by game type ─────────────────────────────────
     print(f"\n{'─'*65}")
-    print("ACTUAL TOTALS BY GAME TYPE")
+    print("AVG ACTUAL TOTAL BY GAME TYPE")
     print(f"{'─'*65}")
-    print(f"{'Type':<22} {'N':>6} {'Avg Total':>10} {'Avg Line':>10} {'Avg Margin':>12} {'Over%':>7}")
-    print(f"{'─'*65}")
+    print(f"  {'Type':<22} {'N':>5}  {'Avg Total':>10}  {'vs Reg Season':>14}")
+    print(f"  {'─'*55}")
 
-    for gtype in ['regular_season', 'neutral_nonconf', 'conf_tournament', 'ncaa_tournament']:
-        sub = df[df['game_type'] == gtype]
-        if len(sub) < 10:
+    reg_mean = df[df['game_type']=='regular_season']['actual_total'].mean()
+
+    for gtype in ['regular_season', 'conf_tournament', 'ncaa_tournament', 'other_postseason']:
+        sub = df[df['game_type']==gtype]
+        if len(sub) < 5:
             continue
-        avg_total  = sub['actual_total'].mean()
-        avg_line   = sub['over_under'].mean()
-        avg_margin = sub['ou_margin'].mean()
-        over_pct   = sub['went_over'].mean() * 100
-        print(f"  {gtype:<20} {len(sub):>6,} {avg_total:>10.1f} {avg_line:>10.1f} "
-              f"{avg_margin:>+12.2f} {over_pct:>6.1f}%")
+        avg = sub['actual_total'].mean()
+        lift = avg - reg_mean
+        lift_str = f"{lift:+.1f} pts" if gtype != 'regular_season' else "  (baseline)"
+        print(f"  {gtype:<22} {len(sub):>5}  {avg:>10.1f}  {lift_str:>14}")
 
-    # ── Month-by-month breakdown ───────────────────────────────────────────
+    # ── Season-by-season lift ─────────────────────────────────────────────
     print(f"\n{'─'*65}")
-    print("OVER% AND AVG MARGIN BY MONTH (all game types)")
+    print("SCORING LIFT BY SEASON (conf + NCAA tournament vs reg season)")
     print(f"{'─'*65}")
-    print(f"{'Month':<10} {'N':>6} {'Avg Total':>10} {'Avg Line':>10} {'Margin':>8} {'Over%':>7}")
-    print(f"{'─'*65}")
+    print(f"  {'Season':<8} {'Reg Avg':>8} {'Conf Avg':>10} {'Conf Lift':>10} {'NCAA Avg':>10} {'NCAA Lift':>10}")
+    print(f"  {'─'*60}")
 
-    month_names = {11:'Nov', 12:'Dec', 1:'Jan', 2:'Feb', 3:'Mar', 4:'Apr'}
-    for month in [11, 12, 1, 2, 3, 4]:
-        sub = df[df['month'] == month]
-        if len(sub) < 10:
+    for season in sorted(df['season'].dropna().unique()):
+        reg  = df[(df['season']==season) & (df['game_type']=='regular_season')]['actual_total']
+        conf = df[(df['season']==season) & (df['game_type']=='conf_tournament')]['actual_total']
+        ncaa = df[(df['season']==season) & (df['game_type']=='ncaa_tournament')]['actual_total']
+        if len(reg) < 10:
             continue
-        avg_total  = sub['actual_total'].mean()
-        avg_line   = sub['over_under'].mean()
-        avg_margin = sub['ou_margin'].mean()
-        over_pct   = sub['went_over'].mean() * 100
-        print(f"  {month_names.get(month,'?'):<10} {len(sub):>6,} {avg_total:>10.1f} "
-              f"{avg_line:>10.1f} {avg_margin:>+8.2f} {over_pct:>6.1f}%")
+        reg_avg  = reg.mean()
+        conf_str = f"{conf.mean():>8.1f} ({conf.mean()-reg_avg:+.1f})" if len(conf)>0 else "       N/A"
+        ncaa_str = f"{ncaa.mean():>8.1f} ({ncaa.mean()-reg_avg:+.1f})" if len(ncaa)>0 else "       N/A"
+        print(f"  {int(season):<8} {reg_avg:>8.1f} {conf_str:>20} {ncaa_str:>20}")
 
-    # ── Neutral site breakdown ─────────────────────────────────────────────
+    # ── Line accuracy for regular season (validation) ─────────────────────
+    reg_lined = df[(df['game_type']=='regular_season') & df['has_line']]
     print(f"\n{'─'*65}")
-    print("NEUTRAL SITE vs HOME/AWAY GAMES")
+    print("REGULAR SEASON LINE ACCURACY (validation)")
     print(f"{'─'*65}")
-    print(f"{'Type':<25} {'N':>6} {'Avg Total':>10} {'Avg Line':>10} {'Margin':>8} {'Over%':>7}")
-    print(f"{'─'*65}")
+    print(f"  N={len(reg_lined):,} | Avg total={reg_lined['actual_total'].mean():.1f} | "
+          f"Avg line={reg_lined['over_under'].mean():.1f} | "
+          f"Avg margin={reg_lined['ou_margin'].mean():+.2f} | "
+          f"Over%={reg_lined['went_over'].mean()*100:.1f}%")
 
-    for label, mask in [
-        ('Regular season',         df['game_type']=='regular_season'),
-        ('Conf tournament',        df['game_type']=='conf_tournament'),
-        ('NCAA tournament',        df['game_type']=='ncaa_tournament'),
-        ('Other postseason',       df['game_type']=='other_postseason'),
-        ('Neutral site (reg ssn)', (df['neutral_site']==1) & (df['game_type']=='regular_season')),
-    ]:
-        sub = df[mask]
-        if len(sub) < 10:
-            continue
-        avg_total  = sub['actual_total'].mean()
-        avg_line   = sub['over_under'].mean()
-        avg_margin = sub['ou_margin'].mean()
-        over_pct   = sub['went_over'].mean() * 100
-        print(f"  {label:<25} {len(sub):>6,} {avg_total:>10.1f} {avg_line:>10.1f} "
-              f"{avg_margin:>+8.2f} {over_pct:>6.1f}%")
-
-    # ── Conference tournament specific ────────────────────────────────────
-    print(f"\n{'─'*65}")
-    print("CONFERENCE TOURNAMENT: LINE ACCURACY BY SEASON")
-    print(f"{'─'*65}")
-    conf_t = df[df['game_type'] == 'conf_tournament']
-    if len(conf_t) > 0:
-        print(f"{'Season':<10} {'N':>6} {'Avg Margin':>12} {'Over%':>8}")
-        for season, grp in conf_t.groupby('season'):
-            print(f"  {int(season):<10} {len(grp):>6} {grp['ou_margin'].mean():>+12.2f} "
-                  f"{grp['went_over'].mean()*100:>7.1f}%")
-
-    # ── Key finding summary ────────────────────────────────────────────────
-    reg  = df[df['game_type'] == 'regular_season']
-    conf = df[df['game_type'] == 'conf_tournament']
-    ncaa = df[df['game_type'] == 'ncaa_tournament']
+    # ── Key findings ──────────────────────────────────────────────────────
+    conf = df[df['game_type']=='conf_tournament']['actual_total']
+    ncaa = df[df['game_type']=='ncaa_tournament']['actual_total']
+    reg  = df[df['game_type']=='regular_season']['actual_total']
 
     print(f"\n{'═'*65}")
     print("KEY FINDINGS")
     print(f"{'═'*65}")
-    if len(conf) > 0 and len(reg) > 0:
-        conf_lift = conf['actual_total'].mean() - reg['actual_total'].mean()
-        conf_margin_diff = conf['ou_margin'].mean() - reg['ou_margin'].mean()
-        print(f"  Conf tournament vs regular season:")
-        print(f"    Actual total lift:    {conf_lift:+.1f} pts")
-        print(f"    Model margin diff:    {conf_margin_diff:+.2f} pts (positive = model underpredicts)")
-        print(f"    Over rate: conf={conf['went_over'].mean()*100:.1f}% vs reg={reg['went_over'].mean()*100:.1f}%")
-
-    if len(ncaa) > 0 and len(reg) > 0:
-        ncaa_lift = ncaa['actual_total'].mean() - reg['actual_total'].mean()
-        ncaa_margin_diff = ncaa['ou_margin'].mean() - reg['ou_margin'].mean()
-        print(f"\n  NCAA tournament vs regular season:")
-        print(f"    Actual total lift:    {ncaa_lift:+.1f} pts")
-        print(f"    Model margin diff:    {ncaa_margin_diff:+.2f} pts")
-        print(f"    Over rate: ncaa={ncaa['went_over'].mean()*100:.1f}% vs reg={reg['went_over'].mean()*100:.1f}%")
-
-    print(f"\n  Interpretation:")
-    print(f"    'Model margin diff' = how much the line UNDERESTIMATES the actual total")
-    print(f"    Positive = overs are hitting more than expected = model should adjust UP")
-    print(f"    This is the adjustment to apply to P(over) during tournament play")
+    print(f"  Regular season avg:     {reg.mean():.1f} pts")
+    if len(conf)>0:
+        print(f"  Conf tournament avg:    {conf.mean():.1f} pts  ({conf.mean()-reg.mean():+.1f} pts vs reg season)")
+    if len(ncaa)>0:
+        print(f"  NCAA tournament avg:    {ncaa.mean():.1f} pts  ({ncaa.mean()-reg.mean():+.1f} pts vs reg season)")
+    print()
+    print("  IMPORTANT: These are raw scoring differences, not line-adjusted.")
+    print("  The DK line already partially prices in tournament pace.")
+    print("  To get the TRUE model adjustment needed, we need DK tournament lines.")
+    print("  Recommend: scrape DK tournament lines for 2023-2025 to measure")
+    print("  how much the line STILL underestimates after market adjustment.")
