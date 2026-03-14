@@ -76,7 +76,7 @@ def run_step(num, label, cmd_parts):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--from',  dest='from_step', type=int, default=1,
+    parser.add_argument('--from',  dest='from_step', type=int, default=0,
                         help='Resume from step N (e.g. --from 5)')
     parser.add_argument('--only',  dest='only_step', type=int, default=None,
                         help='Run only step N')
