@@ -472,6 +472,110 @@ def fetch_todays_refs(games, target_date, norm_fn):
         return 0
 
 
+def build_features(home_raw, away_raw, spread, target_date, conn, feature_cols, norm_fn, schedule_info=None):
+    home = norm_fn(home_raw)
+    away = norm_fn(away_raw)
+    gd_str = str(target_date)
+
+    row = {c: None for c in feature_cols}
+    # Look up conf_game and neutral_site from Torvik schedule
+    sched_key  = frozenset([home, away])
+    sched_data = (schedule_info or {}).get(sched_key, {})
+    conf_game_val    = sched_data.get('conf_game', 0)
+    neutral_site_val = sched_data.get('neutral_site', 0)
+    conf_code        = sched_data.get('conf_code', '')
+    # Tournament flags — conf tournaments end with -T in Torvik conf code
+    # NCAA tournament games are neutral site, non-conf, in March/April
+    is_conf_tourn = int(bool(conf_code and conf_code.endswith('-T')))
+    is_ncaa_tourn = int(
+        neutral_site_val == 1 and
+        conf_game_val == 0 and
+        target_date.month in (3, 4) and
+        not is_conf_tourn
+    )
+    row.update({'neutral_site': neutral_site_val, 'conf_game': conf_game_val, 'spread': spread,
+                'hca_adj': 3.2, 'rest_diff': 0, 'home_rest': 4, 'away_rest': 4,
+                'home_b2b': 0, 'away_b2b': 0,
+                'is_conf_tournament': is_conf_tourn,
+                'is_ncaa_tournament': is_ncaa_tourn})
+
+    def tvd_snap(team):
+        rows = conn.execute("""
+            SELECT snapshot_date, adj_em, adj_o, adj_d, barthag,
+                   efg_o, efg_d, tov_o, tov_d, orb, drb, ftr_o, ftr_d,
+                   two_p_o, two_p_d, three_p_o, three_p_d, blk_pct, ast_pct
+            FROM torvik_daily
+            WHERE team=? ORDER BY snapshot_date DESC""", (team,)).fetchall()
+        for r in rows:
+            snap = str(r[0])
+            if len(snap) == 8: snap = f"{snap[:4]}-{snap[4:6]}-{snap[6:8]}"
+            if snap[:10] < gd_str: return r[1:]  # strip snapshot_date
+        return None
+
+    def kpd_snap(team):
+        rows = conn.execute("""
+            SELECT snapshot_date, adj_em, adj_o, adj_d, adj_tempo, luck, sos, sos_o, sos_d,
+                   rank_adj_em, pythag FROM kenpom_daily
+            WHERE team=? ORDER BY snapshot_date DESC""", (team,)).fetchall()
+        for r in rows:
+            if str(r[0])[:10] < gd_str: return r[1:]
+        return None
+
+    # TVD
+    th, ta = tvd_snap(home), tvd_snap(away)
+    if th:
+        for i, k in enumerate(['h_tvd_adj_em','h_tvd_adj_o','h_tvd_adj_d','h_tvd_barthag']):
+            row[k] = th[i]
+        row['has_tvd_home'] = 1
+    else: row['has_tvd_home'] = 0
+    if ta:
+        for i, k in enumerate(['a_tvd_adj_em','a_tvd_adj_o','a_tvd_adj_d','a_tvd_barthag']):
+            row[k] = ta[i]
+        row['has_tvd_away'] = 1
+    else: row['has_tvd_away'] = 0
+    if th and ta:
+        row['tvd_em_gap']  = (th[0] or 0) - (ta[0] or 0)
+        row['tvd_bar_gap'] = (th[3] or 0) - (ta[3] or 0)
+
+    # KPD
+    kh, ka = kpd_snap(home), kpd_snap(away)
+    kpd_keys_h = ['h_kpd_adj_em','h_kpd_adj_o','h_kpd_adj_d','h_kpd_adj_tempo',
+                  'h_kpd_luck','h_kpd_sos','h_kpd_sos_o','h_kpd_sos_d','h_kpd_rank_adj_em','h_kpd_pythag']
+    kpd_keys_a = ['a_kpd_adj_em','a_kpd_adj_o','a_kpd_adj_d','a_kpd_adj_tempo',
+                  'a_kpd_luck','a_kpd_sos','a_kpd_sos_o','a_kpd_sos_d','a_kpd_rank_adj_em','a_kpd_pythag']
+    if kh:
+        for i, k in enumerate(kpd_keys_h): row[k] = kh[i]
+        row['has_kpd_home'] = 1
+    else: row['has_kpd_home'] = 0
+    if ka:
+        for i, k in enumerate(kpd_keys_a): row[k] = ka[i]
+        row['has_kpd_away'] = 1
+    else: row['has_kpd_away'] = 0
+    if kh and ka:
+        row['kpd_em_gap']   = (kh[0] or 0) - (ka[0] or 0)
+        row['kpd_luck_gap'] = (kh[4] or 0) - (ka[4] or 0)
+        row['kpd_sos_gap']  = (kh[5] or 0) - (ka[5] or 0)
+
+    # KP fanmatch
+    fm = conn.execute("""
+        SELECT home_team, home_pred, away_pred, home_wp, pred_tempo FROM kenpom_fanmatch
+        WHERE game_date=? AND ((home_team=? AND away_team=?) OR (home_team=? AND away_team=?))
+        LIMIT 1""", (gd_str, home, away, away, home)).fetchone()
+    if fm:
+        flipped = (fm[0] != home)
+        h_pred = float(fm[2] if flipped else fm[1]) if fm[1] else None
+        a_pred = float(fm[1] if flipped else fm[2]) if fm[2] else None
+        h_wp   = (1 - float(fm[3])/100 if flipped else float(fm[3])/100) if fm[3] else None
+        row.update({'kp_home_pred': h_pred, 'kp_away_pred': a_pred, 'kp_home_wp': h_wp,
+                    'kp_pred_margin': (h_pred - a_pred) if h_pred and a_pred else None,
+                    'kp_pred_tempo': float(fm[4]) if fm[4] else None, 'has_kp_fanmatch': 1})
+    else:
+        row['has_kp_fanmatch'] = 0
+
+    return row, home, away
+
+
+
 def fetch_injury_flags(games, norm_fn):
     """
     Fetch injury reports for today's teams from ESPN.
