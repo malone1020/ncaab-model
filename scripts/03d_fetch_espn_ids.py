@@ -173,9 +173,12 @@ def normalize(name):
 def fetch_espn_ids_for_date(date_str):
     """
     Fetch all ESPN game IDs for a given date (YYYYMMDD format).
+    Uses groups=50 (D1 only) and limit=200 to get all games.
     Returns list of {espn_id, home_team, away_team} dicts.
     """
-    url = ESPN_SCOREBOARD.format(date=date_str)
+    # groups=50 = D1 men's basketball, limit=300 covers any single day
+    url = (f"https://site.api.espn.com/apis/site/v2/sports/basketball/"
+           f"mens-college-basketball/scoreboard?dates={date_str}&groups=50&limit=300")
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
         if r.status_code != 200:
@@ -295,6 +298,7 @@ if __name__ == '__main__':
                   f"matched={matched}/{len(our_games)} | "
                   f"total={total_matched} | unmatched={total_unmatched}")
             if i == 0 and len(our_games) > 0 and espn_games:
+                print(f"  DEBUG ESPN returned {len(espn_games)} games for {game_date}")
                 print(f"  DEBUG ESPN raw:  {[g['home_team'] for g in espn_games[:5]]}")
                 print(f"  DEBUG ESPN norm: {[normalize(g['home_team']).lower() for g in espn_games[:5]]}")
                 print(f"  DEBUG Our raw:   {[g[1] for g in our_games[:5]]}")
