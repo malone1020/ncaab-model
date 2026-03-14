@@ -34,21 +34,22 @@ SCRIPTS = os.path.join(ROOT, 'scripts')
 PYTHON  = sys.executable
 
 STEPS = [
-    (1,  "CBBD games + lines",          ["03_pull_stats_and_lines.py"]),
-    (2,  "Torvik/Haslametrics",         ["03_pull_all_sources.py"]),
-    (3,  "KenPom archive + fanmatch",   ["03d_pull_kenpom_archive.py"]),
-    (4,  "ESPN game IDs",               ["03d_fetch_espn_ids.py"]),
-    (5,  "Refs 2025",                   ["03e_pull_referees.py", "--season", "2025"]),
-    (6,  "Refs 2024",                   ["03e_pull_referees.py", "--season", "2024"]),
-    (7,  "Refs 2023",                   ["03e_pull_referees.py", "--season", "2023"]),
-    (8,  "Refs 2022",                   ["03e_pull_referees.py", "--season", "2022"]),
-    (9,  "Travel distances",            ["03f_compute_travel.py"]),
-    (10, "Recency features",            ["03g_recency_features.py"]),
-    (11, "Trend slopes",                ["03h_compute_trends.py"]),
+    (0,  "Games table (CBBD)",            ["02_pull_games.py"]),
+    (1,  "CBBD games + lines",            ["03_pull_stats_and_lines.py"]),
+    (2,  "Torvik/Haslametrics",           ["03_pull_all_sources.py"]),
+    (3,  "KenPom archive + fanmatch",     ["03d_pull_kenpom_archive.py"]),
+    (4,  "ESPN game IDs",                 ["03d_fetch_espn_ids.py"]),
+    (5,  "Refs 2025",                     ["03e_pull_referees.py", "--season", "2025"]),
+    (6,  "Refs 2024",                     ["03e_pull_referees.py", "--season", "2024"]),
+    (7,  "Refs 2023",                     ["03e_pull_referees.py", "--season", "2023"]),
+    (8,  "Refs 2022",                     ["03e_pull_referees.py", "--season", "2022"]),
+    (9,  "Travel distances",              ["03f_compute_travel.py"]),
+    (10, "Recency features",              ["03g_recency_features.py"]),
+    (11, "Trend slopes",                  ["03h_compute_trends.py"]),
     (12, "Historical DK lines (2026)",    ["10_scrape_historical_lines.py", "--season", "2026"]),
     (13, "Build features (game_features_v2)", ["04_build_features.py"]),
-    (14, "Spread combo backtest",       ["05_backtest_all_combos.py"]),
-    (15, "Totals combo backtest",       ["05b_backtest_totals_combos.py"]),
+    (14, "Spread combo backtest",         ["05_backtest_all_combos.py"]),
+    (15, "Totals combo backtest",         ["05b_backtest_totals_combos.py"]),
 ]
 
 

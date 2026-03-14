@@ -28,7 +28,7 @@ DB_PATH  = BASE_DIR / "data" / "basketball.db"
 API_KEY     = os.getenv("CBBD_API_KEY")
 BASE_URL    = "https://api.collegebasketballdata.com"
 START_SEASON = 2016
-END_SEASON   = 2025
+END_SEASON   = 2026
 SLEEP_SEC    = 1.5   # be polite between requests
 
 HEADERS = {"Authorization": f"Bearer {API_KEY}"}
@@ -234,7 +234,8 @@ def main():
     print(f"API key  : {API_KEY[:8]}...")
     print()
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=60)
+    conn.execute("PRAGMA journal_mode=WAL")
     ensure_schema(conn)
     print()
 
