@@ -12,7 +12,7 @@ Run: python scripts/07_daily_bets.py
 """
 
 import sqlite3, os, json, sys, argparse, pickle, warnings
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 import pandas as pd
 import numpy as np
 import requests
@@ -158,17 +158,10 @@ def fetch_todays_lines(target_date):
 
 
 def parse_lines(odds_data, target_date):
-    from datetime import timezone
-    now_utc = datetime.now(timezone.utc)
     games = []
     for game in odds_data:
         gdt = datetime.fromisoformat(game['commence_time'].replace('Z', '+00:00'))
         if gdt.date() != target_date:
-            continue
-        if gdt <= now_utc:
-            home = game.get('home_team', '')
-            away = game.get('away_team', '')
-            print(f"  SKIPPED (already tipped): {away} @ {home}")
             continue
         home  = game.get('home_team', '')
         away  = game.get('away_team', '')
@@ -203,7 +196,77 @@ def parse_lines(odds_data, target_date):
 
 
 
-def fetch_torvik_schedule(target_date):
+def store_line_movement(games, target_date, conn, norm_fn):
+    """
+    Store opening and closing lines in line_movement table.
+    - First call of the day (no existing row): stores as open AND close
+    - Subsequent calls: updates close only (preserves opening line)
+    This builds a clean open/close history for future LINE_MOVE feature use.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    stored = 0
+    for g in games:
+        home_norm = norm_fn(g['home_team'])
+        away_norm = norm_fn(g['away_team'])
+        date_str  = str(target_date)
+
+        spread  = g.get('spread')
+        total   = g.get('total')
+        ml_home = g.get('ml_home')
+        ml_away = g.get('ml_away')
+
+        # Check if opening line already stored today
+        existing = conn.execute("""
+            SELECT spread_open, total_open, spread_close, total_close
+            FROM line_movement
+            WHERE game_date = ? AND home_team = ? AND away_team = ?
+        """, (date_str, home_norm, away_norm)).fetchone()
+
+        if existing is None:
+            # First pull — store as both open and close (movement = 0 for now)
+            conn.execute("""
+                INSERT OR REPLACE INTO line_movement
+                (game_date, home_team, away_team,
+                 spread_open, total_open, ml_home_open, ml_away_open,
+                 open_timestamp,
+                 spread_close, total_close, ml_home_close, ml_away_close,
+                 close_timestamp,
+                 spread_move, total_move, ml_home_move,
+                 scraped_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                date_str, home_norm, away_norm,
+                spread, total, ml_home, ml_away, now,
+                spread, total, ml_home, ml_away, now,
+                0.0, 0.0, 0,
+                now,
+            ))
+        else:
+            # Subsequent pull — update close and recompute movement
+            open_spread, open_total = existing[0], existing[1]
+            spread_move = (spread - open_spread) if (spread is not None and open_spread is not None) else None
+            total_move  = (total  - open_total)  if (total  is not None and open_total  is not None) else None
+            conn.execute("""
+                UPDATE line_movement
+                SET spread_close    = ?,
+                    total_close     = ?,
+                    ml_home_close   = ?,
+                    ml_away_close   = ?,
+                    close_timestamp = ?,
+                    spread_move     = ?,
+                    total_move      = ?,
+                    scraped_at      = ?
+                WHERE game_date = ? AND home_team = ? AND away_team = ?
+            """, (
+                spread, total, ml_home, ml_away, now,
+                spread_move, total_move,
+                now,
+                date_str, home_norm, away_norm,
+            ))
+        stored += 1
+
+    conn.commit()
+    return stored
     """
     Fetch today's schedule from Torvik to get conf_game and neutral_site flags.
     Torvik cell format: "3 Arizona vs 7 Iowa St. B12-T ESPN"
@@ -493,6 +556,13 @@ if __name__ == '__main__':
         odds_data = fetch_todays_lines(target_date)
         games = parse_lines(odds_data, target_date)
         print(f"  DraftKings: {len(games)} games on {target_date}")
+
+        # Store opening/closing lines for future LINE_MOVE feature use
+        if games:
+            lm_conn = sqlite3.connect(DB)
+            n_stored = store_line_movement(games, target_date, lm_conn, norm_fn)
+            lm_conn.close()
+            print(f"  Line movement: {n_stored} games logged")
 
     if not games:
         print("No games found. Use --demo for testing.")
