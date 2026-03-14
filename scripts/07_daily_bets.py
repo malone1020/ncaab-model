@@ -983,10 +983,117 @@ def update_results(target_date, norm_fn):
     print(f"\nSaved: {results_path}")
 
     # Update season P&L tracker
-    update_season_pnl(target_date, wins, losses, pushes, total_wagered, total_pnl, bankroll)
+    update_season_pnl(target_date, wins, losses, pushes, total_wagered, total_pnl, bankroll, results=results)
 
 
-def update_season_pnl(target_date, wins, losses, pushes, wagered, pnl, bankroll):
+def update_season_pnl(target_date, wins, losses, pushes, wagered, pnl, bankroll, results=None):
+    """
+    Accumulate daily results into outputs/season_pnl.json.
+    Tracks running P&L, ROI, win rate across the season.
+    """
+    pnl_path = os.path.join(OUT_DIR, 'season_pnl.json')
+
+    # Load existing
+    if os.path.exists(pnl_path):
+        with open(pnl_path) as f:
+            tracker = json.load(f)
+    else:
+        tracker = {
+            'season_start': str(target_date),
+            'bankroll_start': bankroll,
+            'days': [],
+            'totals': {'wins': 0, 'losses': 0, 'pushes': 0,
+                       'wagered': 0.0, 'pnl': 0.0},
+            'by_type': {'spread': {'w':0,'l':0,'p':0,'pnl':0.0},
+                        'total':  {'w':0,'l':0,'p':0,'pnl':0.0},
+                        'ml':     {'w':0,'l':0,'p':0,'pnl':0.0}},
+        }
+
+    # Ensure by_type exists in older tracker files
+    if 'by_type' not in tracker:
+        tracker['by_type'] = {'spread': {'w':0,'l':0,'p':0,'pnl':0.0},
+                              'total':  {'w':0,'l':0,'p':0,'pnl':0.0},
+                              'ml':     {'w':0,'l':0,'p':0,'pnl':0.0}}
+
+    # Remove existing entry for this date if re-running
+    tracker['days'] = [d for d in tracker['days'] if d['date'] != str(target_date)]
+
+    # Add today
+    settled = wins + losses + pushes
+    tracker['days'].append({
+        'date':    str(target_date),
+        'wins':    wins,
+        'losses':  losses,
+        'pushes':  pushes,
+        'wagered': round(wagered, 2),
+        'pnl':     round(pnl, 2),
+        'roi':     round(pnl / wagered, 4) if wagered > 0 else 0,
+        'wr':      round(wins / settled, 4) if settled > 0 else 0,
+    })
+    tracker['days'].sort(key=lambda x: x['date'])
+
+    # Recompute totals from all days
+    t = tracker['totals']
+    t['wins']    = sum(d['wins']    for d in tracker['days'])
+    t['losses']  = sum(d['losses']  for d in tracker['days'])
+    t['pushes']  = sum(d['pushes']  for d in tracker['days'])
+    t['wagered'] = round(sum(d['wagered'] for d in tracker['days']), 2)
+    t['pnl']     = round(sum(d['pnl']     for d in tracker['days']), 2)
+    total_settled = t['wins'] + t['losses'] + t['pushes']
+    t['roi']     = round(t['pnl'] / t['wagered'], 4) if t['wagered'] > 0 else 0
+    t['wr']      = round(t['wins'] / total_settled, 4) if total_settled > 0 else 0
+    t['bets']    = total_settled
+
+    # Update by-type breakdown from today's results
+    if results:
+        for r in results:
+            btype = r.get('bet_type', 'spread').lower()
+            if btype not in tracker['by_type']:
+                tracker['by_type'][btype] = {'w':0,'l':0,'p':0,'pnl':0.0}
+            result = r.get('result','pending').lower()
+            p = r.get('pnl', 0)
+            if result == 'win':   tracker['by_type'][btype]['w']   += 1
+            elif result == 'loss': tracker['by_type'][btype]['l']  += 1
+            elif result == 'push': tracker['by_type'][btype]['p']  += 1
+            tracker['by_type'][btype]['pnl'] = round(
+                tracker['by_type'][btype]['pnl'] + p, 2)
+
+    with open(pnl_path, 'w') as f:
+        json.dump(tracker, f, indent=2, default=str)
+
+    # Print season summary
+    print()
+    print("=" * 55)
+    print("  SEASON P&L SUMMARY")
+    print("=" * 55)
+    print(f"  Record:    {t['wins']}W / {t['losses']}L / {t['pushes']}P  ({t['bets']} bets)")
+    print(f"  Win rate:  {t['wr']:.1%}")
+    print(f"  P&L:       ${t['pnl']:+,.2f}")
+    print(f"  ROI:       {t['roi']:+.1%}")
+    print(f"  Wagered:   ${t['wagered']:,.0f}")
+
+    # By-type breakdown
+    print(f"\n  {'Type':<10} {'W-L-P':<12} {'P&L':>10} {'ROI':>8}")
+    print(f"  {'─'*42}")
+    for btype, s in tracker['by_type'].items():
+        total_s = s['w'] + s['l'] + s['p']
+        if total_s == 0: continue
+        # Estimate wagered (approximate from P&L and win rate)
+        wl = s['w'] + s['l']
+        approx_wagered = wl * 100 if wl > 0 else 1
+        roi_str = f"{s['pnl']/approx_wagered:+.1%}" if approx_wagered > 0 else 'N/A'
+        print(f"  {btype:<10} {s['w']}-{s['l']}-{s['p']:<8} ${s['pnl']:>+9.2f} {roi_str:>8}")
+
+    if len(tracker['days']) > 1:
+        running = 0
+        print(f"\n  {'Date':<12} {'W-L-P':<10} {'Day P&L':>9} {'Running':>10}")
+        print(f"  {'─'*44}")
+        for d in tracker['days']:
+            running += d['pnl']
+            wlp = f"{d['wins']}-{d['losses']}-{d['pushes']}"
+            print(f"  {d['date']:<12} {wlp:<10} ${d['pnl']:>+8.2f} ${running:>+9.2f}")
+    print("=" * 55)
+    print(f"  Saved: {pnl_path}")
     """
     Accumulate daily results into outputs/season_pnl.json.
     Tracks running P&L, ROI, win rate across the season.
