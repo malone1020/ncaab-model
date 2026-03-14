@@ -600,12 +600,13 @@ def ml_kelly_size(ev, bankroll, kelly_frac=KELLY_FRAC, max_pct=MAX_BET_PCT):
     # We approximate payout from ev (not perfect but close enough for sizing)
     return kelly_size(ev, bankroll, kelly_frac, max_pct)
 
-def kelly_size(ev, bankroll):
+def kelly_size(ev, bankroll, kelly_frac=None):
     p = (ev + 1) / (1 + PAYOUT)
     q = 1 - p
     b = PAYOUT
     kelly = max(0, (b * p - q) / b)
-    return round(bankroll * min(kelly * KELLY_FRAC, MAX_BET_PCT), 2)
+    frac = kelly_frac if kelly_frac is not None else KELLY_FRAC
+    return round(bankroll * min(kelly * frac, MAX_BET_PCT), 2)
 
 
 def format_bet_line(b):
@@ -987,11 +988,13 @@ if __name__ == '__main__':
     parser.add_argument('--ev',             type=float, default=EV_MIN)
     parser.add_argument('--demo',           action='store_true', help='Use demo games for testing')
     parser.add_argument('--update-results', action='store_true', help='Fetch final scores and mark bet outcomes')
+    parser.add_argument('--kelly', type=float, default=None, help='Kelly fraction override (default: 0.25 quarter-Kelly). Try 0.5 for half-Kelly.')
     args = parser.parse_args()
 
     target_date = date.fromisoformat(args.date) if args.date else date.today()
     bankroll    = args.bankroll
     ev_thresh   = args.ev
+    kelly_frac  = args.kelly  # None = use default KELLY_FRAC (0.25)
 
     # --update-results: fetch scores and mark outcomes for a saved bet card
     if args.update_results:
@@ -1099,7 +1102,7 @@ if __name__ == '__main__':
                 print(f"  {label:<40} {'SPREAD':<7} {p_spread:>6.3f} {edge_spread:>+6.1f}% {best_spread_ev:>+8.3f}  {status}")
 
                 if qualifies:
-                    sz = kelly_size(best_spread_ev, bankroll)
+                    sz = kelly_size(best_spread_ev, bankroll, kelly_frac)
                     if sz >= 10:
                         sprd_display = spread if spread_side == 'home' else -spread
                         bets.append({
@@ -1142,7 +1145,7 @@ if __name__ == '__main__':
                     # Skip printing lines outside odds range (too short or too long)
 
                     if qual_ml:
-                        sz_ml = kelly_size(best_ml_ev, bankroll)
+                        sz_ml = kelly_size(best_ml_ev, bankroll, kelly_frac)
                         if sz_ml >= 10:
                             bets.append({
                                 'home_team': g['home_team'], 'away_team': g['away_team'],
@@ -1205,7 +1208,7 @@ if __name__ == '__main__':
                 print(f"  {label:<40} {f'TOTAL {tot_label}':<7} {p_tot:>6.3f} {edge_tot:>+6.1f}% {best_tot_ev:>+8.3f}  {status_tot}")
 
                 if qual_tot:
-                    sz_t = kelly_size(best_tot_ev, bankroll)
+                    sz_t = kelly_size(best_tot_ev, bankroll, kelly_frac)
                     if sz_t >= 10:
                         bets.append({
                             'home_team': g['home_team'], 'away_team': g['away_team'],
