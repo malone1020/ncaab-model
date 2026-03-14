@@ -27,7 +27,7 @@ for season in sorted(games.keys()):
 
     tvd = conn.execute("""
         SELECT COUNT(*) FROM game_features_v2
-        WHERE season=? AND h_tvd_adj_o IS NOT NULL""", (season,)).fetchone()[0]
+        WHERE season=? AND h_tvd_barthag IS NOT NULL""", (season,)).fetchone()[0]
 
     refs = conn.execute("""
         SELECT COUNT(*) FROM referee_game rg
