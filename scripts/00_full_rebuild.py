@@ -45,7 +45,7 @@ STEPS = [
     (9,  "Travel distances",            ["03f_compute_travel.py"]),
     (10, "Recency features",            ["03g_recency_features.py"]),
     (11, "Trend slopes",                ["03h_compute_trends.py"]),
-    (12, "Historical DK lines",         ["10_scrape_historical_lines.py"]),
+    (12, "Historical DK lines (2026)",    ["10_scrape_historical_lines.py", "--season", "2026"]),
     (13, "Build features (game_features_v2)", ["04_build_features.py"]),
     (14, "Spread combo backtest",       ["05_backtest_all_combos.py"]),
     (15, "Totals combo backtest",       ["05b_backtest_totals_combos.py"]),
