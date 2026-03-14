@@ -19,19 +19,14 @@ DB   = os.path.join(ROOT, 'data', 'basketball.db')
 
 
 def classify_game_type(row):
-    """Classify game into regular season, conf tournament, or NCAA tournament."""
+    """Classify game using tournament column directly."""
     tournament = str(row.get('tournament') or '').lower()
-    season_type = str(row.get('season_type') or '').lower()
-
-    if any(x in tournament for x in ['ncaa', 'march madness', 'national invitation', 'nit']):
+    if 'ncaa' in tournament:
         return 'ncaa_tournament'
-    if any(x in tournament for x in ['conference', 'conf', 'tournament', 'championship']):
+    if 'conf' in tournament:
         return 'conf_tournament'
-    if 'post' in season_type or 'tournament' in season_type:
-        return 'ncaa_tournament'
-    if row.get('neutral_site') == 1 and row.get('conf_game') == 0:
-        # Neutral site non-conf games in March are likely tournament
-        return 'neutral_nonconf'
+    if 'postseason' in tournament or row.get('season_type') == 'postseason':
+        return 'other_postseason'
     return 'regular_season'
 
 
@@ -119,10 +114,11 @@ if __name__ == '__main__':
     print(f"{'─'*65}")
 
     for label, mask in [
-        ('Home/Away (reg season)', (df['neutral_site']==0) & (df['game_type']=='regular_season')),
-        ('Neutral site (any)',      df['neutral_site']==1),
-        ('Neutral + conf game',    (df['neutral_site']==1) & (df['conf_game']==1)),
-        ('Neutral + non-conf',     (df['neutral_site']==1) & (df['conf_game']==0)),
+        ('Regular season',         df['game_type']=='regular_season'),
+        ('Conf tournament',        df['game_type']=='conf_tournament'),
+        ('NCAA tournament',        df['game_type']=='ncaa_tournament'),
+        ('Other postseason',       df['game_type']=='other_postseason'),
+        ('Neutral site (reg ssn)', (df['neutral_site']==1) & (df['game_type']=='regular_season')),
     ]:
         sub = df[mask]
         if len(sub) < 10:
