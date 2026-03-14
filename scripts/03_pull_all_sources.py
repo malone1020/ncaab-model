@@ -288,7 +288,13 @@ def pull_torvik_daily(seasons=range(2016, 2027)):
             try:
                 r = requests.get(url, timeout=15, headers=HEADERS)
                 if r.status_code != 200: continue
-                data = r.json()  # requests auto-decompresses gzip
+                # Explicitly decompress gzip — requests.json() doesn't handle .gz files
+                import gzip, json as _json
+                try:
+                    raw = gzip.decompress(r.content)
+                    data = _json.loads(raw)
+                except Exception:
+                    data = r.json()  # fallback if not actually gzipped
                 if not data: continue
                 batch = []
                 for td in data:
@@ -318,8 +324,9 @@ def pull_torvik_daily(seasons=range(2016, 2027)):
                 season_new += len(batch)
                 existing_dates.add(snap_date)
                 time.sleep(0.2)
-            except Exception:
-                pass
+            except Exception as e:
+                if season >= 2026:
+                    print(f"    [torvik_daily] {snap_date}: ERROR {e}")
 
         total += season_new
         row_count = cur.execute(
