@@ -208,11 +208,12 @@ def fetch_espn_ids_for_date(date_str):
 
 
 def load_dates(conn, season=None):
-    """Get all unique game dates from DB, optionally filtered by season."""
+    """Get all unique game dates that still have unmatched games."""
     if season:
         rows = conn.execute("""
             SELECT DISTINCT game_date FROM games
-            WHERE season = ? AND (espn_id IS NULL OR espn_id = '')
+            WHERE season = ?
+            AND (espn_id IS NULL OR espn_id = '')
             ORDER BY game_date
         """, (season,)).fetchall()
     else:
@@ -263,6 +264,7 @@ if __name__ == '__main__':
         """, (game_date,)).fetchall()
 
         matched = 0
+        unmatched_names = []
         for our_id, our_home, our_away in our_games:
             our_h = normalize(our_home).lower()
             our_a = normalize(our_away).lower()
@@ -271,11 +273,9 @@ if __name__ == '__main__':
             for eg in espn_games:
                 esp_h = normalize(eg['home_team']).lower()
                 esp_a = normalize(eg['away_team']).lower()
-                # Exact match after normalization
                 if esp_h == our_h and esp_a == our_a:
                     best_match = eg['espn_id']
                     break
-                # Partial match
                 if (our_h in esp_h or esp_h in our_h) and \
                    (our_a in esp_a or esp_a in our_a):
                     best_match = eg['espn_id']
@@ -289,6 +289,7 @@ if __name__ == '__main__':
                 matched += 1
             else:
                 total_unmatched += 1
+                unmatched_names.append(f"{our_home} vs {our_away}")
 
         conn.commit()
         total_matched += matched
@@ -297,6 +298,8 @@ if __name__ == '__main__':
             print(f"  [{i+1}/{len(dates)}] {game_date} | "
                   f"matched={matched}/{len(our_games)} | "
                   f"total={total_matched} | unmatched={total_unmatched}")
+            if unmatched_names:
+                print(f"    Unmatched sample: {unmatched_names[:3]}")
             if i == 0 and len(our_games) > 0 and espn_games:
                 print(f"  DEBUG ESPN returned {len(espn_games)} games for {game_date}")
                 print(f"  DEBUG ESPN raw:  {[g['home_team'] for g in espn_games[:5]]}")
