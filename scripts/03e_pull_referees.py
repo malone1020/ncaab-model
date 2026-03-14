@@ -87,13 +87,15 @@ def get_already_scraped(conn):
 def load_games(conn, season=None):
     if season:
         return conn.execute("""
-            SELECT game_date, home_team, away_team, cbbd_id, season
-            FROM games WHERE season = ? AND cbbd_id IS NOT NULL
+            SELECT game_date, home_team, away_team, espn_id, season
+            FROM games
+            WHERE season = ? AND espn_id IS NOT NULL AND espn_id != ''
             ORDER BY game_date
         """, (season,)).fetchall()
     return conn.execute("""
-        SELECT game_date, home_team, away_team, cbbd_id, season
-        FROM games WHERE cbbd_id IS NOT NULL
+        SELECT game_date, home_team, away_team, espn_id, season
+        FROM games
+        WHERE espn_id IS NOT NULL AND espn_id != ''
         ORDER BY game_date
     """).fetchall()
 
