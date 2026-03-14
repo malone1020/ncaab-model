@@ -70,7 +70,7 @@ if __name__ == '__main__':
     print(f"  Using last {args.n_snaps} Torvik snapshots per game")
     print(f"  Min snapshots required: {MIN_SNAPS}")
 
-    conn = sqlite3.connect(DB)
+    conn = sqlite3.connect(DB, timeout=60)  # wait up to 60s for write lock
 
     # Load recency_eff rows that need trend computation
     if args.overwrite:
