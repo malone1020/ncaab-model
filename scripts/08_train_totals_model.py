@@ -94,6 +94,8 @@ FEATURE_GROUPS = {
 
 def parse_args():
     p = argparse.ArgumentParser()
+    p.add_argument('--optuna', action='store_true',
+                   help='Use Optuna-tuned hyperparameters')
     p.add_argument('--combo', type=str, default=DEFAULT_COMBO,
                    help=f'Feature group combo (default: {DEFAULT_COMBO})')
     return p.parse_args()
@@ -207,13 +209,7 @@ def walk_forward_validate(df, features, target='went_over'):
         X_train_imp = pd.DataFrame(imp.fit_transform(X_train), columns=valid_feats)
         X_test_imp  = pd.DataFrame(imp.transform(X_test), columns=valid_feats)
 
-        base = XGBClassifier(
-            n_estimators=300, max_depth=4, learning_rate=0.05,
-            subsample=0.8, colsample_bytree=0.8,
-            min_child_weight=3, gamma=0.1,
-            use_label_encoder=False, eval_metric='logloss',
-            random_state=42, verbosity=0,
-        )
+        base = make_xgb(getattr(args, "optuna", False))
         model = CalibratedClassifierCV(base, cv=5, method='isotonic')
         model.fit(X_train_imp, y_train)
 
@@ -309,6 +305,7 @@ def train_production_model(df, features, combo_str, target='went_over'):
 
 if __name__ == '__main__':
     args = parse_args()
+    use_optuna = getattr(args, 'optuna', False)
     combo = args.combo
 
     print("=" * 60)

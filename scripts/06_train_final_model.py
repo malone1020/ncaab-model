@@ -100,10 +100,33 @@ LEAKY_SOURCES = {'TVS', 'KP', 'HA_CORE', 'HA_SHOT', 'HA_DELTA', 'HA_MATCHUP'}
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--combo', type=str, default=None)
+    p.add_argument('--optuna', action='store_true',
+                   help='Use Optuna-tuned hyperparameters from models/optuna_spread_params.json')
     return p.parse_args()
 
 
-def get_feature_cols(df, combo_str):
+def make_base(optuna=False):
+    if optuna:
+        params_path = os.path.join(ROOT, 'models', 'optuna_spread_params.json')
+        if os.path.exists(params_path):
+            with open(params_path) as f:
+                data = json.load(f)
+            params = data['params']
+            print(f"  Using Optuna params (best ROI: {data.get('roi',0):+.4f})")
+            return XGBClassifier(
+                **params,
+                use_label_encoder=False, eval_metric='logloss',
+                random_state=42, n_jobs=-1, verbosity=0,
+            )
+        else:
+            print("  ⚠ Optuna params not found — using defaults")
+    return XGBClassifier(
+        n_estimators=300, max_depth=4, learning_rate=0.04,
+        subsample=0.8, colsample_bytree=0.75, min_child_weight=15,
+        reg_alpha=0.1, reg_lambda=1.5,
+        use_label_encoder=False, eval_metric='logloss',
+        random_state=42, n_jobs=-1, verbosity=0,
+    )
     groups = [g.strip() for g in combo_str.split('+')] if combo_str else list(FEATURE_GROUPS.keys())
     cols = []
     for g in groups:
@@ -121,16 +144,6 @@ def load_data():
     df['game_date'] = pd.to_datetime(df['game_date'])
     df['ats_win'] = pd.to_numeric(df['ats_win'], errors='coerce')
     return df
-
-
-def make_base():
-    return XGBClassifier(
-        n_estimators=300, max_depth=4, learning_rate=0.04,
-        subsample=0.8, colsample_bytree=0.75, min_child_weight=15,
-        reg_alpha=0.1, reg_lambda=1.5,
-        use_label_encoder=False, eval_metric='logloss',
-        random_state=42, n_jobs=-1, verbosity=0,
-    )
 
 
 def walkforward_eval(df, feat_cols):
@@ -162,7 +175,7 @@ def walkforward_eval(df, feat_cols):
         X_te = imp.transform(test[valid])
         y_tr = train['ats_win'].astype(int).values
 
-        cal = CalibratedClassifierCV(make_base(), method='isotonic', cv=3)
+        cal = CalibratedClassifierCV(make_base(), method='isotonic', cv=3)  # walkforward uses default
         cal.fit(X_tr, y_tr)
 
         p_home = cal.predict_proba(X_te)[:, 1]
@@ -200,7 +213,7 @@ def walkforward_eval(df, feat_cols):
         print(f"\n  Breakeven WR: 52.38% | Bets with EV≥{EV_MIN:.0%}: {n}")
 
 
-def train_production_model(df, feat_cols):
+def train_production_model(df, feat_cols, use_optuna=False):
     labeled = df[df['ats_win'].notna()].copy()
     valid = [c for c in feat_cols if labeled[c].notna().mean() > 0.1]
 
@@ -209,7 +222,7 @@ def train_production_model(df, feat_cols):
     y = labeled['ats_win'].astype(int).values
 
     print(f"  Training on {len(labeled):,} labeled games, {len(valid)} features...")
-    cal = CalibratedClassifierCV(make_base(), method='isotonic', cv=5)
+    cal = CalibratedClassifierCV(make_base(use_optuna), method='isotonic', cv=5)
     cal.fit(X, y)
 
     # Feature importances averaged across CV folds
@@ -258,10 +271,11 @@ if __name__ == '__main__':
     if is_leaky:
         print("⚠  WARNING: combo includes leaky season-final sources")
 
+    use_optuna = args.optuna
     walkforward_eval(df, feat_cols)
 
     print("\nTraining production model on full dataset...")
-    cal_model, imputer, final_feats = train_production_model(df, feat_cols)
+    cal_model, imputer, final_feats = train_production_model(df, feat_cols, use_optuna)
 
     with open(os.path.join(MODEL, 'production_model.pkl'), 'wb') as f:
         pickle.dump(cal_model, f)
