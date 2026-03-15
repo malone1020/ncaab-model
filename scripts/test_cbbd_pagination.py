@@ -1,4 +1,4 @@
-"""Test CBBD API pagination options."""
+"""Test CBBD date chunking to get past 3000 game cap."""
 import requests, os
 try:
     from dotenv import load_dotenv
@@ -9,27 +9,22 @@ KEY = os.getenv('CBBD_API_KEY','')
 HDR = {'Authorization': f'Bearer {KEY}', 'Accept': 'application/json'}
 BASE = 'https://api.collegebasketballdata.com'
 
-print("Testing CBBD API date range pagination...")
+print("Testing date chunking for 2026 season...")
+total = set()
 
-# Test 1: date range
-r = requests.get(f'{BASE}/games', headers=HDR,
-    params={'season': 2026, 'seasonType': 'regular',
-            'startDate': '2026-01-07', 'endDate': '2026-03-14'}, timeout=15)
-print(f"\nWith startDate/endDate: HTTP {r.status_code}")
-if r.status_code == 200:
-    data = r.json()
-    print(f"  Games returned: {len(data)}")
-    if data:
-        dates = sorted(set(g.get('startDate','')[:10] for g in data))
-        print(f"  Date range: {dates[0]} to {dates[-1]}")
+# Try fetching in monthly chunks with startDate only
+for start in ['2025-11-01', '2025-12-01', '2026-01-01', '2026-02-01', '2026-03-01']:
+    r = requests.get(f'{BASE}/games', headers=HDR,
+        params={'season': 2026, 'seasonType': 'regular', 'startDate': start},
+        timeout=15)
+    if r.status_code == 200:
+        data = r.json()
+        dates = sorted(set(g.get('startDate','')[:10] for g in data if g.get('startDate')))
+        new_games = set(g.get('id') for g in data) - total
+        total.update(g.get('id') for g in data)
+        print(f"  startDate={start}: {len(data)} games | {len(new_games)} new | "
+              f"range: {dates[0] if dates else 'N/A'} to {dates[-1] if dates else 'N/A'}")
+    else:
+        print(f"  startDate={start}: HTTP {r.status_code}")
 
-# Test 2: no date range (baseline)
-r2 = requests.get(f'{BASE}/games', headers=HDR,
-    params={'season': 2026, 'seasonType': 'regular'}, timeout=15)
-print(f"\nNo date filter: HTTP {r2.status_code}")
-if r2.status_code == 200:
-    data2 = r2.json()
-    print(f"  Games returned: {len(data2)}")
-    if data2:
-        dates2 = sorted(set(g.get('startDate','')[:10] for g in data2))
-        print(f"  Date range: {dates2[0]} to {dates2[-1]}")
+print(f"\nTotal unique games found: {len(total)}")
